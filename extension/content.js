@@ -17,7 +17,8 @@ const DEFAULT_SETTINGS = {
     "subtitle_lang",
     "created",
     "tags"
-  ]
+  ],
+  fixedFrontmatterProperties: []
 };
 
 const BOC_VERSION = "1.0.15";
@@ -1641,7 +1642,8 @@ function buildMarkdown(meta, body, settings) {
 
 function buildFrontMatter(meta, settings, created, tagsYaml) {
   const enabled = getEnabledFrontmatterFields(settings);
-  if (enabled.length === 0) {
+  const fixedPropertyLines = getFixedFrontmatterPropertyLines(settings);
+  if (enabled.length === 0 && fixedPropertyLines.length === 0) {
     return "";
   }
 
@@ -1658,6 +1660,7 @@ function buildFrontMatter(meta, settings, created, tagsYaml) {
   };
 
   const lines = enabled.map((field) => fieldLines[field]).filter(Boolean);
+  lines.push(...fixedPropertyLines);
   if (lines.length === 0) {
     return "";
   }
@@ -1680,6 +1683,79 @@ function getEnabledFrontmatterFields(settings) {
     unique.push(key);
   });
   return unique;
+}
+
+function getFixedFrontmatterPropertyLines(settings) {
+  const customPropertyKeyPattern = /^[\p{L}\p{N}_\-\s]+$/u;
+  const systemFields = new Set(
+    (Array.isArray(DEFAULT_SETTINGS.frontmatterFields) ? DEFAULT_SETTINGS.frontmatterFields : []).map((field) =>
+      String(field).toLowerCase()
+    )
+  );
+  const rows = Array.isArray(settings?.fixedFrontmatterProperties) ? settings.fixedFrontmatterProperties : [];
+  const seenKeys = new Set();
+  const lines = [];
+
+  rows.forEach((item) => {
+    const key = String(item?.key || "").trim();
+    const type = normalizeFixedPropertyType(item?.type);
+    const value = item?.value;
+    const lowerKey = key.toLowerCase();
+    if (!key || isFixedPropertyRowEffectivelyEmpty(type, value)) {
+      return;
+    }
+    if (!customPropertyKeyPattern.test(key)) {
+      return;
+    }
+    if (systemFields.has(lowerKey) || seenKeys.has(lowerKey)) {
+      return;
+    }
+    seenKeys.add(lowerKey);
+    const yamlLine = formatFixedPropertyYamlLine(key, type, value);
+    if (yamlLine) {
+      lines.push(yamlLine);
+    }
+  });
+
+  return lines;
+}
+
+function normalizeFixedPropertyType(value) {
+  const type = String(value || "").trim().toLowerCase();
+  return type === "number" || type === "checkbox" || type === "list" ? type : "text";
+}
+
+function isFixedPropertyRowEffectivelyEmpty(type, value) {
+  return !String(value || "").trim();
+}
+
+function formatFixedPropertyYamlLine(key, type, value) {
+  const normalizedType = normalizeFixedPropertyType(type);
+  if (normalizedType === "number") {
+    const num = Number(String(value || "").trim());
+    if (!Number.isFinite(num)) {
+      return "";
+    }
+    return `${key}: ${String(value).trim()}`;
+  }
+
+  if (normalizedType === "checkbox") {
+    const normalizedValue = String(value || "").trim().toLowerCase();
+    if (normalizedValue !== "true" && normalizedValue !== "false") {
+      return "";
+    }
+    return `${key}: ${normalizedValue}`;
+  }
+
+  if (normalizedType === "list") {
+    const items = String(value || "")
+      .split(/[，,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return `${key}: [${items.map((item) => `"${escapeYaml(item)}"`).join(", ")}]`;
+  }
+
+  return `${key}: "${escapeYaml(value)}"`;
 }
 
 function buildSubtitleSectionLines(body, chapters, settings, withHours) {
