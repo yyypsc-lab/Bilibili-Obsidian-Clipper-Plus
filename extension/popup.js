@@ -19,6 +19,11 @@ const DEFAULT_SETTINGS = {
   downloadFormat: "srt"
 };
 
+function formatLocalDate(value = Date.now()) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 init().catch((error) => {
   setStatus(`初始化失败：${error.message}`);
 });
@@ -135,7 +140,7 @@ function render(payload) {
 
   setText(el.propTitle, payload.title || "-");
   setText(el.propUrl, payload.url || "-");
-  setText(el.propCreated, new Date().toISOString().slice(0, 10));
+  setText(el.propCreated, formatLocalDate());
   setText(el.propTags, payload.tags || "clippings");
   el.propTitle.title = payload.title || "";
   el.propUrl.title = payload.url || "";

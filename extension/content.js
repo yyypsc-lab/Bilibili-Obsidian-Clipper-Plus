@@ -53,6 +53,11 @@ const state = {
   settings: { ...DEFAULT_SETTINGS }
 };
 
+function formatLocalDate(value = Date.now()) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function shouldDebugLog() {
   return Boolean(state.settings?.enableDebugLogs);
 }
@@ -1004,7 +1009,7 @@ async function fetchVideoMeta(bvid) {
 
   const data = payload.data || {};
   const pubdate = Number(data.pubdate || 0);
-  const uploadDate = pubdate > 0 ? new Date(pubdate * 1000).toISOString().slice(0, 10) : "";
+  const uploadDate = pubdate > 0 ? formatLocalDate(pubdate * 1000) : "";
   const pages = Array.isArray(data.pages) ? data.pages : [];
 
   return {
@@ -1122,7 +1127,7 @@ function readUploadDate() {
     return dateText;
   }
 
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate();
 }
 
 async function fetchSubtitleBundle(bvid, cid, aid = "") {
@@ -1599,7 +1604,7 @@ function buildSubtitlePreview(body, settings) {
 }
 
 function buildMarkdown(meta, body, settings) {
-  const created = new Date().toISOString().slice(0, 10);
+  const created = formatLocalDate();
   const tags = (settings.tags || "")
     .split(",")
     .map((item) => item.trim())
@@ -1959,7 +1964,7 @@ function buildNoteFilename(meta) {
   const baseParts = [];
 
   if (includeDate) {
-    baseParts.push(new Date().toISOString().slice(0, 10));
+    baseParts.push(formatLocalDate());
   }
 
   baseParts.push(meta.title || meta.bvid || "bilibili-subtitle");
