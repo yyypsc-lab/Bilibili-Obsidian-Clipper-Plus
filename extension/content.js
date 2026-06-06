@@ -144,11 +144,17 @@ function isWatchlaterPage(url = location.href) {
 }
 
 function getReaderContentMaxPx() {
+  if (state.readingContentWidth === "compact") {
+    return 680;
+  }
   if (state.readingContentWidth === "narrow") {
-    return 720;
+    return 760;
   }
   if (state.readingContentWidth === "wide") {
-    return 1040;
+    return 980;
+  }
+  if (state.readingContentWidth === "full") {
+    return 1100;
   }
   return 860;
 }
@@ -235,19 +241,19 @@ function normalizeReaderTheme(value) {
 }
 
 function normalizeReaderFontScale(value) {
-  return value === "s" || value === "l" ? value : "m";
+  return ["xs", "s", "m", "l", "xl"].includes(value) ? value : "m";
 }
 
 function normalizeReaderLetterSpacing(value) {
-  return value === "tight" || value === "relaxed" ? value : "normal";
+  return ["tighter", "tight", "normal", "relaxed", "loose"].includes(value) ? value : "normal";
 }
 
 function normalizeReaderLineHeight(value) {
-  return value === "normal" || value === "relaxed" ? value : "tight";
+  return ["compact", "tight", "normal", "relaxed", "loose"].includes(value) ? value : "tight";
 }
 
 function normalizeReaderContentWidth(value) {
-  return value === "narrow" || value === "wide" ? value : "medium";
+  return ["compact", "narrow", "medium", "wide", "full"].includes(value) ? value : "medium";
 }
 
 function normalizeReaderChapterVisibility(value) {
@@ -502,19 +508,27 @@ function buildUiHtml() {
           <section id="${ids.readingSettingsPanel}" class="boc-reading-panel boc-reading-settings-panel" hidden>
             <section class="boc-reading-settings-group">
               <div class="boc-reading-eyebrow">排版</div>
-              <div class="boc-reading-panel-row boc-reading-layout-toggles">
-                <button id="${ids.readingFontScaleSelect}" type="button" class="boc-reading-toggle-btn" title="字号">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="12" y="17" font-size="13" font-weight="bold" text-anchor="middle" stroke="none" fill="currentColor">Aa</text></svg>
-                </button>
-                <button id="${ids.readingLetterSpacingSelect}" type="button" class="boc-reading-toggle-btn" title="字间距">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
-                </button>
-                <button id="${ids.readingLineHeightSelect}" type="button" class="boc-reading-toggle-btn" title="行间距">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 4v16M10 4v16M14 4v16M18 4v16"/></svg>
-                </button>
-                <button id="${ids.readingContentWidthSelect}" type="button" class="boc-reading-toggle-btn" title="正文宽度">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h16v16H4z"/><path d="M9 9h6v6H9z"/></svg>
-                </button>
+              <div class="boc-reading-stepper-list">
+                ${buildReaderStepperControl({
+                  id: ids.readingFontScaleSelect,
+                  title: "字号",
+                  settingKey: "readerFontScale"
+                })}
+                ${buildReaderStepperControl({
+                  id: ids.readingLetterSpacingSelect,
+                  title: "字间距",
+                  settingKey: "readerLetterSpacing"
+                })}
+                ${buildReaderStepperControl({
+                  id: ids.readingLineHeightSelect,
+                  title: "行间距",
+                  settingKey: "readerLineHeight"
+                })}
+                ${buildReaderStepperControl({
+                  id: ids.readingContentWidthSelect,
+                  title: "正文宽度",
+                  settingKey: "readerContentWidth"
+                })}
               </div>
             </section>
 
@@ -633,30 +647,10 @@ function bindUiEvents() {
     state.readingDescriptionExpanded = !state.readingDescriptionExpanded;
     renderReadingInfoPanel();
   });
-  readingFontScaleSelect.addEventListener("click", () => {
-    const options = ["s", "m", "l"];
-    const current = state.readingFontScale || "m";
-    const nextIndex = (options.indexOf(current) + 1) % options.length;
-    updateReaderPreferences({ readerFontScale: options[nextIndex] }, { persist: true });
-  });
-  readingLetterSpacingSelect.addEventListener("click", () => {
-    const options = ["tight", "normal", "relaxed"];
-    const current = state.readingLetterSpacing || "normal";
-    const nextIndex = (options.indexOf(current) + 1) % options.length;
-    updateReaderPreferences({ readerLetterSpacing: options[nextIndex] }, { persist: true });
-  });
-  readingLineHeightSelect.addEventListener("click", () => {
-    const options = ["tight", "normal", "relaxed"];
-    const current = state.readingLineHeight || "tight";
-    const nextIndex = (options.indexOf(current) + 1) % options.length;
-    updateReaderPreferences({ readerLineHeight: options[nextIndex] }, { persist: true });
-  });
-  readingContentWidthSelect.addEventListener("click", () => {
-    const options = ["narrow", "medium", "wide"];
-    const current = state.readingContentWidth || "medium";
-    const nextIndex = (options.indexOf(current) + 1) % options.length;
-    updateReaderPreferences({ readerContentWidth: options[nextIndex] }, { persist: true });
-  });
+  bindReaderStepperControl(readingFontScaleSelect, "readerFontScale");
+  bindReaderStepperControl(readingLetterSpacingSelect, "readerLetterSpacing");
+  bindReaderStepperControl(readingLineHeightSelect, "readerLineHeight");
+  bindReaderStepperControl(readingContentWidthSelect, "readerContentWidth");
   readingChapterVisibilitySelect.addEventListener("change", (event) => {
     updateReaderPreferences({ readerChapterVisibility: event.target.value }, { persist: true });
   });
@@ -1813,11 +1807,115 @@ function updateReaderChapterPresence(hasChapters) {
 
 function getToggleLabel(key, value) {
   const labels = {
-    letterSpacing: { tight: "紧", normal: "中", relaxed: "松" },
-    lineHeight: { tight: "紧", normal: "中", relaxed: "松" },
-    contentWidth: { narrow: "窄", medium: "中", wide: "宽" }
+    fontScale: { xs: "最小", s: "偏小", m: "标准", l: "偏大", xl: "最大" },
+    letterSpacing: { tighter: "最紧", tight: "偏紧", normal: "标准", relaxed: "偏松", loose: "最松" },
+    lineHeight: { compact: "最紧", tight: "偏紧", normal: "标准", relaxed: "偏松", loose: "最松" },
+    contentWidth: { compact: "最窄", narrow: "偏窄", medium: "标准", wide: "偏宽", full: "最宽" }
   };
-  return labels[key]?.[value] || "中";
+  return labels[key]?.[value] || "标准";
+}
+
+function getReaderStepperConfig(settingKey) {
+  const configs = {
+    readerFontScale: {
+      options: ["xs", "s", "m", "l", "xl"],
+      labelKey: "fontScale",
+      getCurrent: () => state.readingFontScale,
+      buildPayload: (value) => ({ readerFontScale: value })
+    },
+    readerLetterSpacing: {
+      options: ["tighter", "tight", "normal", "relaxed", "loose"],
+      labelKey: "letterSpacing",
+      getCurrent: () => state.readingLetterSpacing,
+      buildPayload: (value) => ({ readerLetterSpacing: value })
+    },
+    readerLineHeight: {
+      options: ["compact", "tight", "normal", "relaxed", "loose"],
+      labelKey: "lineHeight",
+      getCurrent: () => state.readingLineHeight,
+      buildPayload: (value) => ({ readerLineHeight: value })
+    },
+    readerContentWidth: {
+      options: ["compact", "narrow", "medium", "wide", "full"],
+      labelKey: "contentWidth",
+      getCurrent: () => state.readingContentWidth,
+      buildPayload: (value) => ({ readerContentWidth: value })
+    }
+  };
+  return configs[settingKey] || null;
+}
+
+function buildReaderStepperControl({
+  id,
+  title,
+  settingKey
+}) {
+  const config = getReaderStepperConfig(settingKey);
+  if (!config) {
+    return "";
+  }
+  return `
+    <div id="${id}" class="boc-reading-stepper" data-reader-setting-id="${id}">
+      <span class="boc-reading-stepper-title">${escapeHtml(title)}</span>
+      <div class="boc-reading-stepper-buttons" role="group" aria-label="${escapeHtml(title)}">
+        ${config.options
+          .map(
+            (option, index) => `
+          <button
+            type="button"
+            class="boc-reading-stepper-btn"
+            data-value="${escapeHtml(option)}"
+            aria-label="${escapeHtml(title)} ${escapeHtml(getToggleLabel(config.labelKey, option))}"
+            title="${escapeHtml(getToggleLabel(config.labelKey, option))}"
+          >${index + 1}</button>
+        `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function bindReaderStepperControl(node, settingKey) {
+  if (!node || node.dataset.bocBound === "1") {
+    return;
+  }
+
+  node.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-value]");
+    if (!button) {
+      return;
+    }
+    setReaderPreference(settingKey, button.dataset.value || "");
+  });
+  node.dataset.bocBound = "1";
+}
+
+function setReaderPreference(settingKey, nextValue) {
+  const config = getReaderStepperConfig(settingKey);
+  if (!config) {
+    return;
+  }
+
+  const current = config.getCurrent();
+  if (!config.options.includes(nextValue) || nextValue === current) {
+    return;
+  }
+  updateReaderPreferences(config.buildPayload(nextValue), { persist: true });
+}
+
+function renderReaderStepperState(node, settingKey) {
+  const config = getReaderStepperConfig(settingKey);
+  if (!node || !config) {
+    return;
+  }
+
+  const current = config.getCurrent();
+  node.querySelectorAll("[data-value]").forEach((button) => {
+    const isActive = button.dataset.value === current;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
 }
 
 function renderReaderPanels() {
@@ -1825,6 +1923,10 @@ function renderReaderPanels() {
   const settingsBtn = byId(ids.readingSettingsBtn);
   settingsPanel.hidden = !state.readingSettingsExpanded;
   settingsBtn.classList.toggle("is-active", state.readingSettingsExpanded);
+  renderReaderStepperState(byId(ids.readingFontScaleSelect), "readerFontScale");
+  renderReaderStepperState(byId(ids.readingLetterSpacingSelect), "readerLetterSpacing");
+  renderReaderStepperState(byId(ids.readingLineHeightSelect), "readerLineHeight");
+  renderReaderStepperState(byId(ids.readingContentWidthSelect), "readerContentWidth");
 }
 
 function renderReadingInfoPanel() {
@@ -1905,6 +2007,7 @@ function updateReaderPreferences(next, { persist = true } = {}) {
     readerChapterVisibility: state.readingChapterVisibility
   };
   applyReadingViewPresentation();
+  renderReaderPanels();
   if (persist) {
     persistReaderSettings();
   }

@@ -11,6 +11,7 @@ const DEFAULT_SYNC_SETTINGS = {
   readerLetterSpacing: "normal",
   readerLineHeight: "tight",
   readerContentWidth: "medium",
+  readerChapterVisibility: "show",
   frontmatterFields: [
     "title",
     "url",
@@ -393,6 +394,7 @@ async function getMergedSettings() {
   merged.readerLetterSpacing = normalizeReaderLetterSpacing(merged.readerLetterSpacing ?? merged.readerLineHeight);
   merged.readerLineHeight = normalizeReaderLineHeight(merged.readerLineHeight);
   merged.readerContentWidth = normalizeReaderContentWidth(merged.readerContentWidth);
+  merged.readerChapterVisibility = normalizeReaderChapterVisibility(merged.readerChapterVisibility);
   merged.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(merged.fixedFrontmatterProperties);
   let apiKey = normalizeApiKey(localSettings.obsidianApiKey);
   const legacySyncApiKey = normalizeApiKey(syncSettings.obsidianApiKey);
@@ -421,6 +423,7 @@ async function saveSettings(settings) {
   );
   syncPayload.readerLineHeight = normalizeReaderLineHeight(syncPayload.readerLineHeight);
   syncPayload.readerContentWidth = normalizeReaderContentWidth(syncPayload.readerContentWidth);
+  syncPayload.readerChapterVisibility = normalizeReaderChapterVisibility(syncPayload.readerChapterVisibility);
   syncPayload.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(syncPayload.fixedFrontmatterProperties);
 
   await Promise.all([
@@ -448,19 +451,23 @@ function normalizeReaderTheme(value) {
 }
 
 function normalizeReaderFontScale(value) {
-  return value === "s" || value === "l" ? value : "m";
+  return ["xs", "s", "m", "l", "xl"].includes(value) ? value : "m";
 }
 
 function normalizeReaderLetterSpacing(value) {
-  return value === "tight" || value === "relaxed" ? value : "normal";
+  return ["tighter", "tight", "normal", "relaxed", "loose"].includes(value) ? value : "normal";
 }
 
 function normalizeReaderLineHeight(value) {
-  return value === "normal" || value === "relaxed" ? value : "tight";
+  return ["compact", "tight", "normal", "relaxed", "loose"].includes(value) ? value : "tight";
 }
 
 function normalizeReaderContentWidth(value) {
-  return value === "narrow" || value === "wide" ? value : "medium";
+  return ["compact", "narrow", "medium", "wide", "full"].includes(value) ? value : "medium";
+}
+
+function normalizeReaderChapterVisibility(value) {
+  return value === "hide" || value === "auto" ? value : "show";
 }
 
 function normalizeFixedFrontmatterProperties(value) {
