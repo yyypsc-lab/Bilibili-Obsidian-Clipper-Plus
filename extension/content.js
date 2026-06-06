@@ -1972,16 +1972,12 @@ function buildReadingSummaryItems() {
   if (state.uploadDate) {
     items.push({ label: "日期", value: state.uploadDate });
   }
-  items.push({ label: "来源", value: "bilibili.com" });
   if (Number(state.pageCount) > 1) {
     const pageParts = [`P${Number(state.pageIndex) > 0 ? Number(state.pageIndex) : 1}`];
     if (state.pageTitle) {
       pageParts.push(state.pageTitle);
     }
     items.push({ label: "分P", value: pageParts.join(" ") });
-  }
-  if (state.selectedSubtitleLang) {
-    items.push({ label: "字幕", value: state.selectedSubtitleLang });
   }
   return items;
 }

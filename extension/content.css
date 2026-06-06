@@ -739,49 +739,49 @@ body[data-boc-reader-mode="1"][data-boc-reader-theme="paper"],
 html[data-boc-reader-mode="1"][data-boc-reader-font-scale="s"],
 body[data-boc-reader-mode="1"][data-boc-reader-font-scale="s"],
 #boc-reading-view[data-font-scale="s"] {
-  --boc-reader-transcript-font-size: 13px;
+  --boc-reader-transcript-font-size: 12.8px;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-font-scale="xs"],
 body[data-boc-reader-mode="1"][data-boc-reader-font-scale="xs"],
 #boc-reading-view[data-font-scale="xs"] {
-  --boc-reader-transcript-font-size: 12px;
+  --boc-reader-transcript-font-size: 11.6px;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-font-scale="l"],
 body[data-boc-reader-mode="1"][data-boc-reader-font-scale="l"],
 #boc-reading-view[data-font-scale="l"] {
-  --boc-reader-transcript-font-size: 16px;
+  --boc-reader-transcript-font-size: 16.4px;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-font-scale="xl"],
 body[data-boc-reader-mode="1"][data-boc-reader-font-scale="xl"],
 #boc-reading-view[data-font-scale="xl"] {
-  --boc-reader-transcript-font-size: 18px;
+  --boc-reader-transcript-font-size: 18.8px;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="tighter"],
 body[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="tighter"],
 #boc-reading-view[data-letter-spacing="tighter"] {
-  --boc-reader-letter-spacing: -0.06em;
+  --boc-reader-letter-spacing: -0.072em;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="tight"],
 body[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="tight"],
 #boc-reading-view[data-letter-spacing="tight"] {
-  --boc-reader-letter-spacing: -0.03em;
+  --boc-reader-letter-spacing: -0.036em;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="relaxed"],
 body[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="relaxed"],
 #boc-reading-view[data-letter-spacing="relaxed"] {
-  --boc-reader-letter-spacing: 0.03em;
+  --boc-reader-letter-spacing: 0.036em;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="loose"],
 body[data-boc-reader-mode="1"][data-boc-reader-letter-spacing="loose"],
 #boc-reading-view[data-letter-spacing="loose"] {
-  --boc-reader-letter-spacing: 0.06em;
+  --boc-reader-letter-spacing: 0.072em;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-content-width="compact"],
@@ -1060,19 +1060,19 @@ body[data-boc-reader-mode="1"] {
       )
     )
   );
-  --boc-reader-transcript-line-height: 1.34;
+  --boc-reader-transcript-line-height: 1.404;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-line-height="compact"],
 body[data-boc-reader-mode="1"][data-boc-reader-line-height="compact"],
 #boc-reading-view[data-line-height="compact"] {
-  --boc-reader-transcript-line-height: 1.2;
+  --boc-reader-transcript-line-height: 1.32;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-line-height="tight"],
 body[data-boc-reader-mode="1"][data-boc-reader-line-height="tight"],
 #boc-reading-view[data-line-height="tight"] {
-  --boc-reader-transcript-line-height: 1.34;
+  --boc-reader-transcript-line-height: 1.404;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-line-height="normal"],
@@ -1084,13 +1084,13 @@ body[data-boc-reader-mode="1"][data-boc-reader-line-height="normal"],
 html[data-boc-reader-mode="1"][data-boc-reader-line-height="relaxed"],
 body[data-boc-reader-mode="1"][data-boc-reader-line-height="relaxed"],
 #boc-reading-view[data-line-height="relaxed"] {
-  --boc-reader-transcript-line-height: 1.66;
+  --boc-reader-transcript-line-height: 1.596;
 }
 
 html[data-boc-reader-mode="1"][data-boc-reader-line-height="loose"],
 body[data-boc-reader-mode="1"][data-boc-reader-line-height="loose"],
 #boc-reading-view[data-line-height="loose"] {
-  --boc-reader-transcript-line-height: 1.82;
+  --boc-reader-transcript-line-height: 1.692;
 }
 
 body[data-boc-reader-mode="1"] .boc-reading-actions {
