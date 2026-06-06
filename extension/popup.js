@@ -11,6 +11,7 @@ const el = {
   copyBtn: document.getElementById("copyBtn"),
   downloadBtn: document.getElementById("downloadBtn"),
   sendBtn: document.getElementById("sendBtn"),
+  readingViewBtn: document.getElementById("readingViewBtn"),
   settingsBtn: document.getElementById("settingsBtn")
 };
 
@@ -30,7 +31,22 @@ init().catch((error) => {
 
 async function init() {
   bindEvents();
+  // Check if should enter reading mode when popup opens
+  await checkAndEnterReadingMode();
   await refreshFromTab();
+}
+
+async function checkAndEnterReadingMode() {
+  const tab = await getActiveTab();
+  if (!tab?.url) return;
+  try {
+    const parsed = new URL(tab.url);
+    if (parsed.searchParams.get("boc_reader") === "1") {
+      await sendToContent({ type: "popup-trigger-reading-view" });
+    }
+  } catch (e) {
+    // ignore
+  }
 }
 
 function bindEvents() {
@@ -82,6 +98,34 @@ function bindEvents() {
       setMessage(`发送失败：${resp?.error || "未知错误"}`);
     }
     render(resp?.payload || latestPayload);
+  });
+
+  el.readingViewBtn.addEventListener("click", async () => {
+    const tab = await getActiveTab();
+    if (!isSupportedSubtitlePage(tab?.url || "")) {
+      setMessage("请先打开一个 B 站视频页。");
+      return;
+    }
+
+    const prepResp = await sendToContent({ type: "popup-get-state" });
+    if (!prepResp?.ok) {
+      setMessage(prepResp?.error || "请刷新浏览器网页重试，或当前网页不支持");
+      return;
+    }
+
+    setStatus("正在打开阅读视图...");
+    const resp = await sendToRuntime({
+      type: "open-reading-view-tab",
+      url: tab.url,
+      tabId: tab.id
+    });
+    if (!resp?.ok) {
+      setMessage(`打开失败：${resp?.error || "未知错误"}`);
+      return;
+    }
+    setMessage("已在当前页面打开阅读视图。");
+    setStatus("阅读视图已打开。");
+    window.setTimeout(() => window.close(), 80);
   });
 
   el.subtitleSelect.addEventListener("change", async (event) => {
@@ -269,15 +313,37 @@ async function ensureContentScriptReady(tabId) {
     throw new Error("请刷新浏览器网页重试，或当前网页不支持");
   }
 
+  let alreadyLoaded = false;
+  try {
+    const probe = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(globalThis.__BOC_CONTENT_SCRIPT_LOADED__)
+    });
+    alreadyLoaded = Boolean(probe?.[0]?.result);
+  } catch {
+    alreadyLoaded = false;
+  }
+
+  if (alreadyLoaded) {
+    return;
+  }
+
   await chrome.scripting.insertCSS({
     target: { tabId },
     files: ["content.css"]
   });
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content.js"]
-  });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    });
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (!message.includes("Identifier 'DEFAULT_SETTINGS' has already been declared")) {
+      throw error;
+    }
+  }
 }
 
 async function sendMessageToTab(tabId, message) {

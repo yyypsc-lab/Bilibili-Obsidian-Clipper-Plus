@@ -6,6 +6,11 @@ const DEFAULT_SYNC_SETTINGS = {
   includeDateInFilename: true,
   includeTimestampInBody: true,
   enableDebugLogs: false,
+  readerTheme: "light",
+  readerFontScale: "m",
+  readerLetterSpacing: "normal",
+  readerLineHeight: "tight",
+  readerContentWidth: "medium",
   frontmatterFields: [
     "title",
     "url",
@@ -27,6 +32,101 @@ const DEFAULT_LOCAL_SETTINGS = {
 chrome.runtime.onInstalled.addListener(async () => {
   await initializeSettingsStorage();
 });
+
+async function ensureReaderContentReady(tabId) {
+  if (!chrome.scripting || !tabId) {
+    return;
+  }
+
+  let alreadyLoaded = false;
+  try {
+    const probe = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(globalThis.__BOC_CONTENT_SCRIPT_LOADED__)
+    });
+    alreadyLoaded = Boolean(probe?.[0]?.result);
+  } catch {
+    alreadyLoaded = false;
+  }
+
+  if (alreadyLoaded) {
+    return;
+  }
+
+  await chrome.scripting.insertCSS({
+    target: { tabId },
+    files: ["content.css"]
+  });
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    });
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (!message.includes("Identifier 'DEFAULT_SETTINGS' has already been declared")) {
+      throw error;
+    }
+  }
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForTabUrlReady(tabId, expectedUrl, retries = 40, delayMs = 250) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab?.url === expectedUrl && tab.status === "complete") {
+      return true;
+    }
+    await sleep(delayMs);
+  }
+  return false;
+}
+
+async function sendMessageToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (resp) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(resp);
+    });
+  });
+}
+
+async function triggerReaderModeInTab(tabId, readerUrl = "", retries = 12, delayMs = 300) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(delayMs);
+    }
+
+    try {
+      const response = await sendMessageToTab(tabId, {
+        type: "popup-trigger-reading-view",
+        readerUrl
+      });
+      if (response?.ok) {
+        return true;
+      }
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (message.includes("Could not establish connection. Receiving end does not exist.")) {
+        try {
+          await ensureReaderContentReady(tabId);
+        } catch {
+          // keep retrying
+        }
+        continue;
+      }
+    }
+  }
+
+  return false;
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") {
@@ -51,6 +151,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     chrome.tabs
       .create({ url: chrome.runtime.getURL("options.html") })
       .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "open-reading-view-tab") {
+    const url = String(message.url || "").trim();
+    const tabId = Number(message.tabId || 0) || 0;
+    if (!url) {
+      sendResponse({ ok: false, error: "缺少视频地址" });
+      return false;
+    }
+    if (!tabId) {
+      sendResponse({ ok: false, error: "缺少标签页信息" });
+      return false;
+    }
+
+    let readerUrl = "";
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname !== "www.bilibili.com") {
+        throw new Error("当前网页不是 B 站视频页");
+      }
+      parsed.searchParams.set("boc_reader", "1");
+      readerUrl = parsed.toString();
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message || "阅读视图地址无效" });
+      return false;
+    }
+
+    ensureReaderContentReady(tabId)
+      .then(() => triggerReaderModeInTab(tabId, readerUrl))
+      .then((triggered) => {
+        if (!triggered) {
+          throw new Error("阅读视图触发失败，请刷新浏览器网页重试");
+        }
+        sendResponse({ ok: true });
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
@@ -224,6 +361,11 @@ async function getMergedSettings() {
 
   const merged = { ...DEFAULT_SYNC_SETTINGS, ...syncSettings };
   merged.downloadFormat = normalizeDownloadFormat(merged.downloadFormat);
+  merged.readerTheme = normalizeReaderTheme(merged.readerTheme);
+  merged.readerFontScale = normalizeReaderFontScale(merged.readerFontScale);
+  merged.readerLetterSpacing = normalizeReaderLetterSpacing(merged.readerLetterSpacing ?? merged.readerLineHeight);
+  merged.readerLineHeight = normalizeReaderLineHeight(merged.readerLineHeight);
+  merged.readerContentWidth = normalizeReaderContentWidth(merged.readerContentWidth);
   merged.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(merged.fixedFrontmatterProperties);
   let apiKey = normalizeApiKey(localSettings.obsidianApiKey);
   const legacySyncApiKey = normalizeApiKey(syncSettings.obsidianApiKey);
@@ -245,6 +387,13 @@ async function saveSettings(settings) {
   const syncPayload = { ...payload };
   delete syncPayload.obsidianApiKey;
   syncPayload.downloadFormat = normalizeDownloadFormat(syncPayload.downloadFormat);
+  syncPayload.readerTheme = normalizeReaderTheme(syncPayload.readerTheme);
+  syncPayload.readerFontScale = normalizeReaderFontScale(syncPayload.readerFontScale);
+  syncPayload.readerLetterSpacing = normalizeReaderLetterSpacing(
+    syncPayload.readerLetterSpacing ?? syncPayload.readerLineHeight
+  );
+  syncPayload.readerLineHeight = normalizeReaderLineHeight(syncPayload.readerLineHeight);
+  syncPayload.readerContentWidth = normalizeReaderContentWidth(syncPayload.readerContentWidth);
   syncPayload.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(syncPayload.fixedFrontmatterProperties);
 
   await Promise.all([
@@ -265,6 +414,26 @@ function normalizeApiKey(value) {
 
 function normalizeDownloadFormat(value) {
   return value === "txt" ? "txt" : "srt";
+}
+
+function normalizeReaderTheme(value) {
+  return value === "dark" || value === "paper" ? value : "light";
+}
+
+function normalizeReaderFontScale(value) {
+  return value === "s" || value === "l" ? value : "m";
+}
+
+function normalizeReaderLetterSpacing(value) {
+  return value === "tight" || value === "relaxed" ? value : "normal";
+}
+
+function normalizeReaderLineHeight(value) {
+  return value === "normal" || value === "relaxed" ? value : "tight";
+}
+
+function normalizeReaderContentWidth(value) {
+  return value === "narrow" || value === "wide" ? value : "medium";
 }
 
 function normalizeFixedFrontmatterProperties(value) {

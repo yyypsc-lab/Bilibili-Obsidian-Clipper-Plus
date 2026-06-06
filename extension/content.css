@@ -173,6 +173,12 @@
   display: block;
 }
 
+#boc-reading-view[data-boc-reader-ready="0"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .boc-reading-layout {
   min-height: 0;
   height: 100%;
@@ -581,6 +587,12 @@ body[data-boc-reader-mode="1"] #boc-reading-view {
 
 body[data-boc-reader-mode="1"] #boc-reading-view.open {
   display: block;
+}
+
+body[data-boc-reader-mode="1"] #boc-reading-view[data-boc-reader-ready="0"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 body[data-boc-reader-mode="1"] .boc-reading-header-copy,

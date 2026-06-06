@@ -78,6 +78,7 @@ const state = {
   readingPlayerAdjustedNodes: [],
   readingPlayerObserver: null,
   readingPlayerMountTimer: 0,
+  readingPlayerRetryTimer: 0,
   readingMiniDismissTimer: 0,
   readingControlsHideTimer: 0,
   readingControlsHoverHost: null,
@@ -89,6 +90,7 @@ const state = {
   readingDocumentClickBound: false,
   readingManualScrollPauseUntil: 0,
   readingProgrammaticScrollUntil: 0,
+  readingViewReady: false,
   statusText: "准备就绪，点击“刷新抓取”开始。",
   messageText: "",
   settings: { ...DEFAULT_SETTINGS }
@@ -114,6 +116,21 @@ function stripReaderModeUrl(url = location.href) {
     return parsed.toString();
   } catch {
     return url;
+  }
+}
+
+function replaceReaderModeUrl(nextUrl) {
+  const targetUrl = String(nextUrl || "").trim();
+  if (!targetUrl || targetUrl === location.href) {
+    return;
+  }
+
+  try {
+    history.replaceState(history.state, "", targetUrl);
+    state.currentUrl = location.href;
+    state.currentClipSignature = computeCurrentClipSignature(location.href);
+  } catch (error) {
+    logWarn("[BOC] failed to replace reader mode url", error);
   }
 }
 
@@ -252,6 +269,15 @@ function logWarn(...args) {
   }
 }
 
+function installReaderDebugHelpers() {
+  const snapshotReader = (label = "manual") => createReaderDebugSnapshot(label);
+  globalThis.__BOC_READER_DEBUG_SNAPSHOT__ = snapshotReader;
+  globalThis.__BOC_DEBUG__ = {
+    ...(globalThis.__BOC_DEBUG__ || {}),
+    snapshotReader
+  };
+}
+
 const ids = {
   root: "boc-root",
   panel: "boc-panel",
@@ -295,6 +321,7 @@ init();
 function init() {
   logInfo(`[BOC] content script loaded, version=${BOC_VERSION}`);
   ensureUiReady({ forceRecreate: true });
+  installReaderDebugHelpers();
 
   const shouldEnterReaderMode = isReaderMode();
   if (shouldEnterReaderMode) {
@@ -453,6 +480,12 @@ function bindRuntimeEvents() {
 
     if (message.type === "popup-trigger-reading-view") {
       ensureUiReady();
+      const readerUrl = String(message.readerUrl || "").trim();
+      if (readerUrl) {
+        replaceReaderModeUrl(readerUrl);
+        document.documentElement.setAttribute("data-boc-reader-mode", "1");
+        document.body.setAttribute("data-boc-reader-mode", "1");
+      }
       if (!state.readingViewOpen) {
         enterReaderMode().catch((error) => {
           logWarn("[BOC] reading mode trigger failed", error);
@@ -508,7 +541,7 @@ function buildUiHtml() {
       <p id="${ids.message}" class="boc-message"></p>
     </aside>
 
-    <section id="${ids.readingView}" aria-hidden="true">
+    <section id="${ids.readingView}" aria-hidden="true" data-boc-reader-ready="0" aria-busy="true">
       <div class="boc-reading-layout">
         <aside class="boc-reading-rail">
           <div class="boc-reading-eyebrow">章节</div>
@@ -639,8 +672,7 @@ function bindUiEvents() {
   settingsBtn.addEventListener("click", requestOpenOptions);
   readingCloseBtn.addEventListener("click", () => {
     if (isReaderMode()) {
-      location.href = stripReaderModeUrl(location.href);
-      return;
+      replaceReaderModeUrl(stripReaderModeUrl(location.href));
     }
     closeReadingView();
   });
@@ -931,9 +963,21 @@ async function refreshClip() {
       }))
     );
 
-    // 单源策略下，空字幕直接失败，避免空结果重试导致串轨。
+    // 无字幕时也允许进入阅读视图，只是字幕区域保持空态。
     if (state.subtitles.length === 0) {
-      throw new Error("这个视频暂时没有可用字幕。");
+      applyNoSubtitleState();
+      renderMeta();
+      renderSubtitleSelect();
+      if (state.readingViewOpen) {
+        moveReadingMainInline();
+        renderReadingView();
+        renderReadingStatus("当前视频无字幕。");
+        startReadingViewSync();
+        startReaderPlayerObserver();
+        syncReadingViewPlayback(true);
+      }
+      setStatus("当前视频无字幕。");
+      return;
     }
 
     // 显式点击“刷新抓取”时默认走网络，避免命中历史缓存导致字幕错位。
@@ -946,7 +990,19 @@ async function refreshClip() {
     });
 
     if (!preferred) {
-      throw new Error("这个视频暂时没有可用字幕。");
+      applyNoSubtitleState();
+      renderMeta();
+      renderSubtitleSelect();
+      if (state.readingViewOpen) {
+        moveReadingMainInline();
+        renderReadingView();
+        renderReadingStatus("当前视频无字幕。");
+        startReadingViewSync();
+        startReaderPlayerObserver();
+        syncReadingViewPlayback(true);
+      }
+      setStatus("当前视频无字幕。");
+      return;
     }
 
     const candidates = buildSubtitleCandidates(state.subtitles, preferred);
@@ -1403,6 +1459,28 @@ function setMessage(text) {
   byId(ids.message).textContent = state.messageText;
 }
 
+function applyNoSubtitleState() {
+  state.selectedSubtitleId = "";
+  state.selectedSubtitleUrl = "";
+  state.selectedSubtitleLang = "";
+  state.subtitleBody = [];
+  state.markdown = "";
+  state.srt = "";
+  state.txt = "";
+  byId(ids.preview).value = "";
+}
+
+function cleanupReaderFloatingArtifacts(playerHost = state.readingPlayerHost) {
+  if (document.pictureInPictureElement) {
+    document.exitPictureInPicture().catch(() => {});
+  }
+  dismissReaderMiniPlayer(playerHost);
+  const runtimeHost = findReaderPlayerHost(getRuntimeVideoElement());
+  if (runtimeHost && runtimeHost !== playerHost) {
+    dismissReaderMiniPlayer(runtimeHost);
+  }
+}
+
 async function enterReaderMode() {
   const readingView = byId(ids.readingView);
   state.readingViewOpen = true;
@@ -1414,6 +1492,7 @@ async function enterReaderMode() {
   await sleep(0);
   readingView.classList.add("open", "reader-page");
   readingView.setAttribute("aria-hidden", "false");
+  setReadingViewReady(false);
   renderReadingStatus("正在准备播放器和字幕...");
   applyReaderPageFocus();
   renderReadingView();
@@ -1432,17 +1511,22 @@ async function enterReaderMode() {
 }
 
 function scheduleReaderPlayerRetry() {
+  if (state.readingPlayerRetryTimer) {
+    window.clearTimeout(state.readingPlayerRetryTimer);
+    state.readingPlayerRetryTimer = 0;
+  }
   // Keep trying to mount player in background
   const tryMount = async () => {
+    state.readingPlayerRetryTimer = 0;
     if (!state.readingViewOpen || !isReaderMode()) return;
     const mounted = await ensureReaderPlayerMounted({ retries: 10, delayMs: 200, forceLayout: true });
     if (mounted) {
       finishEnterReaderMode();
     } else if (state.readingViewOpen) {
-      setTimeout(tryMount, 500);
+      state.readingPlayerRetryTimer = window.setTimeout(tryMount, 500);
     }
   };
-  setTimeout(tryMount, 500);
+  state.readingPlayerRetryTimer = window.setTimeout(tryMount, 500);
 }
 
 function finishEnterReaderMode() {
@@ -1465,6 +1549,13 @@ function finishEnterReaderMode() {
   layoutReaderPlayerHost();
   syncReadingViewPlayback(true);
   updateReaderFollowState();
+  if (!isReaderPresentationStable()) {
+    setReadingViewReady(false);
+    renderReadingStatus("正在稳定播放器布局...");
+    scheduleReaderPlayerRetry();
+    return;
+  }
+  setReadingViewReady(true);
   renderReadingStatus("阅读视图已就绪，播放视频时字幕会自动高亮。");
 }
 
@@ -1567,9 +1658,6 @@ async function openReadingView() {
   if (!video) {
     throw new Error("当前页面没有找到可联动的视频播放器。");
   }
-  if (!state.subtitleBody.length) {
-    throw new Error("当前视频暂时没有可用字幕。");
-  }
 
   state.readingViewOpen = true;
   state.readingNativePageMode = false;
@@ -1579,25 +1667,38 @@ async function openReadingView() {
   const readingView = byId(ids.readingView);
   readingView.classList.add("open");
   readingView.setAttribute("aria-hidden", "false");
+  setReadingViewReady(false);
   moveReadingMainInline();
   renderReadingView();
-  renderReadingStatus("已连接页面原生播放器，点击章节或字幕可跳转。");
+  layoutReaderPlayerHost();
+  renderReadingStatus(state.subtitleBody.length ? "已连接页面原生播放器，点击章节或字幕可跳转。" : "当前视频无字幕。");
   startReadingViewSync();
   syncReadingViewPlayback(true);
+  updateReaderFollowState();
+  setReadingViewReady(true);
 }
 
 function closeReadingView() {
+  cleanupReaderFloatingArtifacts();
   state.readingViewOpen = false;
   state.readingNativePageMode = false;
+  state.readingViewReady = false;
   state.readingSettingsExpanded = false;
   state.readingManualScrollPauseUntil = 0;
   state.readingProgrammaticScrollUntil = 0;
   state.readingNextScrollBehavior = "smooth";
+  if (state.readingPlayerRetryTimer) {
+    window.clearTimeout(state.readingPlayerRetryTimer);
+    state.readingPlayerRetryTimer = 0;
+  }
   const readingView = byId(ids.readingView);
   readingView.classList.remove("open", "reader-page");
   readingView.setAttribute("aria-hidden", "true");
+  readingView.setAttribute("data-boc-reader-ready", "0");
   readingView.removeAttribute("data-boc-reader-follow");
   document.body.removeAttribute("data-boc-reading-active");
+  document.documentElement.removeAttribute("data-boc-reader-mode");
+  document.body.removeAttribute("data-boc-reader-mode");
   document.documentElement.removeAttribute("data-boc-reader-theme");
   document.documentElement.removeAttribute("data-boc-reader-font-scale");
   document.documentElement.removeAttribute("data-boc-reader-letter-spacing");
@@ -1617,6 +1718,8 @@ function closeReadingView() {
   unbindReaderLayout();
   cleanupReaderPlayerHost();
   clearReaderPageFocus();
+  window.setTimeout(() => cleanupReaderFloatingArtifacts(), 40);
+  window.setTimeout(() => cleanupReaderFloatingArtifacts(), 220);
 }
 
 function renderReadingView() {
@@ -1660,7 +1763,7 @@ function renderReadingView() {
   }
 
   if (transcriptItems.length === 0) {
-    transcriptList.innerHTML = '<div class="boc-reading-empty">当前视频还没有可读字幕。</div>';
+    transcriptList.innerHTML = '<div class="boc-reading-empty">当前视频无字幕。</div>';
   } else {
     transcriptList.innerHTML = transcriptItems
       .map(
@@ -1889,6 +1992,156 @@ function renderReadingStatus(text) {
   byId(ids.readingStatus).textContent = String(text || "");
 }
 
+function setReadingViewReady(ready) {
+  state.readingViewReady = Boolean(ready);
+  const readingView = document.getElementById(ids.readingView);
+  if (!readingView) {
+    return;
+  }
+  readingView.setAttribute("data-boc-reader-ready", state.readingViewReady ? "1" : "0");
+  readingView.setAttribute("aria-busy", state.readingViewReady ? "false" : "true");
+}
+
+function isReaderPresentationStable(playerHost = state.readingPlayerHost) {
+  if (!state.readingViewOpen || !playerHost?.isConnected) {
+    return false;
+  }
+  const rect = playerHost.getBoundingClientRect();
+  if (!(rect.width > 240) || !(rect.height > 120)) {
+    return false;
+  }
+  if (!state.readingNativePageMode) {
+    return true;
+  }
+  return !hasNativeReaderPlayerLayoutIssue(playerHost);
+}
+
+function createReaderDebugSnapshot(label = "manual") {
+  const pickNodeSnapshot = (selector) => {
+    const node = document.querySelector(selector);
+    if (!node) {
+      return null;
+    }
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return {
+      selector,
+      tag: node.tagName,
+      id: node.id || "",
+      className: typeof node.className === "string" ? node.className : "",
+      rect: {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height)
+      },
+      style: {
+        display: style.display,
+        position: style.position,
+        width: style.width,
+        height: style.height,
+        maxWidth: style.maxWidth,
+        maxHeight: style.maxHeight,
+        top: style.top,
+        left: style.left,
+        transform: style.transform,
+        overflow: style.overflow,
+        zIndex: style.zIndex
+      },
+      attrs: {
+        readerKeep: node.getAttribute("data-boc-reader-keep"),
+        readerHidden: node.getAttribute("data-boc-reader-hidden"),
+        readerReset: node.getAttribute("data-boc-reader-player-reset")
+      }
+    };
+  };
+
+  const playerHost = state.readingPlayerHost || findReaderPlayerHost(getRuntimeVideoElement());
+  const wrapNode = getReaderPlayerWrapNode(playerHost);
+  const video = state.readingVideoEl || getRuntimeVideoElement();
+  const hostChain = [];
+  let current = playerHost;
+  let depth = 0;
+  while (current && depth < 8) {
+    const rect = current.getBoundingClientRect();
+    const style = window.getComputedStyle(current);
+    hostChain.push({
+      tag: current.tagName,
+      id: current.id || "",
+      className: typeof current.className === "string" ? current.className : "",
+      rect: {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height)
+      },
+      style: {
+        position: style.position,
+        width: style.width,
+        height: style.height,
+        top: style.top,
+        left: style.left,
+        transform: style.transform,
+        overflow: style.overflow,
+        zIndex: style.zIndex
+      },
+      readerReset: current.getAttribute("data-boc-reader-player-reset")
+    });
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return {
+    label: String(label || "manual"),
+    url: location.href,
+    readerMode: document.documentElement.getAttribute("data-boc-reader-mode"),
+    readingActive: document.body.getAttribute("data-boc-reading-active"),
+    readingViewOpen: state.readingViewOpen,
+    readingNativePageMode: state.readingNativePageMode,
+    readingViewReady: state.readingViewReady,
+    readyStable: isReaderPresentationStable(playerHost),
+    hasLayoutIssue: hasNativeReaderPlayerLayoutIssue(playerHost),
+    hasRoot: Boolean(document.getElementById(ids.root)),
+    hasReadingView: Boolean(document.getElementById(ids.readingView)),
+    playerHost: playerHost
+      ? {
+          tag: playerHost.tagName,
+          id: playerHost.id || "",
+          className: typeof playerHost.className === "string" ? playerHost.className : ""
+        }
+      : null,
+    wrapNode: wrapNode
+      ? {
+          tag: wrapNode.tagName,
+          id: wrapNode.id || "",
+          className: typeof wrapNode.className === "string" ? wrapNode.className : ""
+        }
+      : null,
+    video: video
+      ? {
+          currentTime: Number(video.currentTime || 0) || 0,
+          paused: Boolean(video.paused),
+          videoWidth: Number(video.videoWidth || 0) || 0,
+          videoHeight: Number(video.videoHeight || 0) || 0
+        }
+      : null,
+    nodes: [
+      "#app",
+      "#playerWrap",
+      ".player-wrap",
+      "#bilibili-player",
+      ".bpx-player-container",
+      ".bpx-player-video-area",
+      ".bpx-player-primary-area",
+      "#boc-reading-inline-host",
+      "#boc-reading-view"
+    ]
+      .map((selector) => pickNodeSnapshot(selector))
+      .filter(Boolean),
+    hostChain
+  };
+}
+
 function bindReaderLayout() {
   if (state.readingLayoutBound) {
     return;
@@ -2052,6 +2305,10 @@ function stopReadingViewSync() {
   if (state.readingPlayerMountTimer) {
     window.clearTimeout(state.readingPlayerMountTimer);
     state.readingPlayerMountTimer = 0;
+  }
+  if (state.readingPlayerRetryTimer) {
+    window.clearTimeout(state.readingPlayerRetryTimer);
+    state.readingPlayerRetryTimer = 0;
   }
   stopReaderPlayerObserver();
   unbindReaderPlayerControlsHover();
