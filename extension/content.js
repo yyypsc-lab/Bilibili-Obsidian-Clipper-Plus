@@ -7,6 +7,12 @@ const DEFAULT_SETTINGS = {
   includeDateInFilename: true,
   includeTimestampInBody: true,
   enableDebugLogs: false,
+  readerTheme: "light",
+  readerFontScale: "m",
+  readerLetterSpacing: "normal",
+  readerLineHeight: "tight",
+  readerContentWidth: "medium",
+  readerChapterVisibility: "show",
   frontmatterFields: [
     "title",
     "url",
@@ -23,7 +29,7 @@ const DEFAULT_SETTINGS = {
 
 const BOC_VERSION = "1.0.17";
 const CACHE_KEY_PREFIX = "boc_subtitle_cache_";
-
+globalThis.__BOC_CONTENT_SCRIPT_LOADED__ = BOC_VERSION;
 const state = {
   currentUrl: location.href,
   fetchRunId: 0,
@@ -48,6 +54,41 @@ const state = {
   markdown: "",
   srt: "",
   txt: "",
+  readingViewOpen: false,
+  readingNativePageMode: false,
+  readingRootOriginalParent: null,
+  readingAutoScroll: true,
+  readingTheme: "light",
+  readingFontScale: "m",
+  readingLetterSpacing: "normal",
+  readingLineHeight: "tight",
+  readingContentWidth: "medium",
+  readingChapterVisibility: "show",
+  readingSettingsExpanded: false,
+  readingDescriptionExpanded: false,
+  readingActiveSubtitleIndex: -1,
+  readingActiveChapterIndex: -1,
+  readingNextScrollBehavior: "smooth",
+  readingSyncTimer: 0,
+  currentClipSignature: "",
+  readingVideoEl: null,
+  readingPlayerHost: null,
+  readingMainOriginalParent: null,
+  readingMainOriginalNextSibling: null,
+  readingPlayerAdjustedNodes: [],
+  readingPlayerObserver: null,
+  readingPlayerMountTimer: 0,
+  readingMiniDismissTimer: 0,
+  readingControlsHideTimer: 0,
+  readingControlsHoverHost: null,
+  readingVideoEventsBound: false,
+  readingLayoutBound: false,
+  uiEventsBound: false,
+  runtimeEventsBound: false,
+  urlWatcherStarted: false,
+  readingDocumentClickBound: false,
+  readingManualScrollPauseUntil: 0,
+  readingProgrammaticScrollUntil: 0,
   statusText: "准备就绪，点击“刷新抓取”开始。",
   messageText: "",
   settings: { ...DEFAULT_SETTINGS }
@@ -56,6 +97,143 @@ const state = {
 function formatLocalDate(value = Date.now()) {
   const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function isReaderMode(url = location.href) {
+  try {
+    return new URL(url).searchParams.get("boc_reader") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function stripReaderModeUrl(url = location.href) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete("boc_reader");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function isWatchlaterPage(url = location.href) {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "") === "/list/watchlater";
+  } catch {
+    return false;
+  }
+}
+
+function getReaderContentMaxPx() {
+  if (state.readingContentWidth === "narrow") {
+    return 720;
+  }
+  if (state.readingContentWidth === "wide") {
+    return 1040;
+  }
+  return 860;
+}
+
+function getReaderPagePaddingPx() {
+  return Math.min(32, Math.max(16, window.innerWidth * 0.028));
+}
+
+function getReaderMainWidthLimit() {
+  return Math.max(320, Math.min(getReaderContentMaxPx(), window.innerWidth - getReaderPagePaddingPx() * 2));
+}
+
+function clearNativeReaderFloatingStyles(playerHost = state.readingPlayerHost) {
+  if (!state.readingNativePageMode || !playerHost) {
+    return;
+  }
+
+  const targets = [];
+  let current = playerHost;
+  let depth = 0;
+  while (current && current !== document.body && depth < 8) {
+    if (
+      current.matches?.(
+        ".bpx-player-container, .bpx-docker, .bpx-player-video-area, .bpx-player-primary-area, #bilibili-player, #playerWrap, .player-wrap"
+      )
+    ) {
+      targets.push(current);
+    }
+    if (current.id === "playerWrap") {
+      break;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  targets.forEach((node) => {
+    node.style.removeProperty("position");
+    node.style.removeProperty("inset");
+    node.style.removeProperty("left");
+    node.style.removeProperty("top");
+    node.style.removeProperty("right");
+    node.style.removeProperty("bottom");
+    node.style.removeProperty("transform");
+    node.style.removeProperty("width");
+    node.style.removeProperty("height");
+    node.style.removeProperty("max-width");
+    node.style.removeProperty("max-height");
+    node.style.removeProperty("margin");
+    node.style.removeProperty("z-index");
+  });
+}
+
+function getReaderPlayerWrapNode(playerHost = state.readingPlayerHost) {
+  return (
+    playerHost?.closest?.("#playerWrap") ||
+    playerHost?.closest?.(".player-wrap") ||
+    document.getElementById("playerWrap") ||
+    document.querySelector(".player-wrap")
+  );
+}
+
+function hasNativeReaderPlayerLayoutIssue(playerHost = state.readingPlayerHost) {
+  if (!state.readingNativePageMode || !playerHost) {
+    return false;
+  }
+
+  const playerStyle = window.getComputedStyle(playerHost);
+  if (playerStyle.position === "fixed" || playerStyle.position === "sticky") {
+    return true;
+  }
+
+  const playerRect = playerHost.getBoundingClientRect();
+  const wrapNode = getReaderPlayerWrapNode(playerHost);
+  if (!wrapNode) {
+    return false;
+  }
+
+  const wrapRect = wrapNode.getBoundingClientRect();
+  return wrapRect.height <= 8 && playerRect.height > 120;
+}
+
+function normalizeReaderTheme(value) {
+  return value === "dark" || value === "paper" ? value : "light";
+}
+
+function normalizeReaderFontScale(value) {
+  return value === "s" || value === "l" ? value : "m";
+}
+
+function normalizeReaderLetterSpacing(value) {
+  return value === "tight" || value === "relaxed" ? value : "normal";
+}
+
+function normalizeReaderLineHeight(value) {
+  return value === "normal" || value === "relaxed" ? value : "tight";
+}
+
+function normalizeReaderContentWidth(value) {
+  return value === "narrow" || value === "wide" ? value : "medium";
+}
+
+function normalizeReaderChapterVisibility(value) {
+  return value === "hide" || value === "auto" ? value : "show";
 }
 
 function shouldDebugLog() {
@@ -87,33 +265,144 @@ const ids = {
   sendBtn: "boc-send-btn",
   refreshBtn: "boc-refresh-btn",
   closeBtn: "boc-close-btn",
-  settingsBtn: "boc-settings-btn"
+  settingsBtn: "boc-settings-btn",
+  readingView: "boc-reading-view",
+  readingPlayerSlot: "boc-reading-player-slot",
+  readingStatus: "boc-reading-status",
+  readingCloseBtn: "boc-reading-close-btn",
+  readingRefreshBtn: "boc-reading-refresh-btn",
+  readingAutoScroll: "boc-reading-autoscroll",
+  readingThemeSelect: "boc-reading-theme-select",
+  readingSettingsBtn: "boc-reading-settings-btn",
+  readingSettingsPanel: "boc-reading-settings-panel",
+  readingFontScaleSelect: "boc-reading-font-scale-select",
+  readingLetterSpacingSelect: "boc-reading-letter-spacing-select",
+  readingLineHeightSelect: "boc-reading-line-height-select",
+  readingContentWidthSelect: "boc-reading-content-width-select",
+  readingChapterVisibilitySelect: "boc-reading-chapter-visibility-select",
+  readingSubtitleSelect: "boc-reading-subtitle-select",
+  readingInfoSummary: "boc-reading-info-summary",
+  readingInfoDescription: "boc-reading-info-description",
+  readingDescriptionBtn: "boc-reading-description-btn",
+  readingMeta: "boc-reading-meta",
+  readingChapterList: "boc-reading-chapters",
+  readingTranscriptList: "boc-reading-transcript",
+  readingTranscriptTailSpacer: "boc-reading-tail-spacer"
 };
 
 init();
 
 function init() {
-  const existingRoot = document.getElementById(ids.root);
-  if (existingRoot) {
-    existingRoot.remove();
+  logInfo(`[BOC] content script loaded, version=${BOC_VERSION}`);
+  ensureUiReady({ forceRecreate: true });
+
+  const shouldEnterReaderMode = isReaderMode();
+  if (shouldEnterReaderMode) {
+    document.documentElement.setAttribute("data-boc-reader-mode", "1");
+    document.body.setAttribute("data-boc-reader-mode", "1");
   }
 
-  logInfo(`[BOC] content script loaded, version=${BOC_VERSION}`);
-
-  const root = document.createElement("div");
-  root.id = ids.root;
-  root.innerHTML = buildUiHtml();
-  document.body.appendChild(root);
-
-  bindUiEvents();
   bindRuntimeEvents();
   startUrlWatcher();
   getSettings().then((settings) => {
     state.settings = settings;
+    hydrateReaderStateFromSettings(settings);
+    applyReadingViewPresentation();
+
+    // Check for storage flag (for pages where URL param might be lost)
+    if (shouldEnterReaderMode) {
+      enterReaderModeFromStorage().catch((error) => {
+        renderReadingStatus(`阅读视图启动失败：${getErrorMessage(error)}`);
+      });
+    } else {
+      // Also check storage even if URL param not present
+      checkStorageForReadingMode();
+    }
   });
+
+  // Fallback: periodically check if reading mode should be entered
+  // This handles cases where URL changed after content script loaded
+  let fallbackCheckCount = 0;
+  const fallbackCheckInterval = setInterval(async () => {
+    if (state.readingViewOpen) {
+      clearInterval(fallbackCheckInterval);
+      return;
+    }
+    if (isReaderMode()) {
+      clearInterval(fallbackCheckInterval);
+      checkStorageForReadingMode().catch(() => {});
+      return;
+    }
+    // Also check chrome.storage.local (set by popup before reload)
+    try {
+      const result = await chrome.storage.local.get("bocEnterReadingMode");
+      if (result.bocEnterReadingMode === "1") {
+        clearInterval(fallbackCheckInterval);
+        document.documentElement.setAttribute("data-boc-reader-mode", "1");
+        document.body.setAttribute("data-boc-reader-mode", "1");
+        checkStorageForReadingMode().catch(() => {});
+      }
+    } catch (e) {
+      // ignore
+    }
+    fallbackCheckCount++;
+    if (fallbackCheckCount > 30) clearInterval(fallbackCheckInterval); // stop after ~3s
+  }, 100);
+}
+
+function ensureUiReady({ forceRecreate = false } = {}) {
+  const existingRoot = document.getElementById(ids.root);
+  if (existingRoot && forceRecreate) {
+    existingRoot.remove();
+    state.uiEventsBound = false;
+  }
+
+  let root = document.getElementById(ids.root);
+  if (!root) {
+    root = document.createElement("div");
+    root.id = ids.root;
+    root.innerHTML = buildUiHtml();
+    document.body.appendChild(root);
+    state.uiEventsBound = false;
+  }
+
+  if (!state.uiEventsBound) {
+    bindUiEvents();
+    state.uiEventsBound = true;
+  }
+}
+
+async function checkStorageForReadingMode() {
+  try {
+    const result = await chrome.storage.local.get("bocEnterReadingMode");
+    if (result.bocEnterReadingMode === "1") {
+      await chrome.storage.local.remove("bocEnterReadingMode");
+      document.documentElement.setAttribute("data-boc-reader-mode", "1");
+      document.body.setAttribute("data-boc-reader-mode", "1");
+      enterReaderMode().catch((error) => {
+        renderReadingStatus(`阅读视图启动失败：${getErrorMessage(error)}`);
+      });
+    }
+  } catch (e) {
+    // Storage access failed, ignore
+  }
+}
+
+async function enterReaderModeFromStorage() {
+  await enterReaderMode();
+  try {
+    await chrome.storage.local.remove("bocEnterReadingMode");
+  } catch (e) {
+    // Ignore
+  }
 }
 
 function bindRuntimeEvents() {
+  if (state.runtimeEventsBound) {
+    return;
+  }
+  state.runtimeEventsBound = true;
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") {
       return false;
@@ -162,6 +451,27 @@ function bindRuntimeEvents() {
       return true;
     }
 
+    if (message.type === "popup-trigger-reading-view") {
+      ensureUiReady();
+      if (!state.readingViewOpen) {
+        enterReaderMode().catch((error) => {
+          logWarn("[BOC] reading mode trigger failed", error);
+        });
+      }
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === "popup-open-reading-view") {
+      ensureUiReady();
+      openReadingView()
+        .then(() => sendResponse({ ok: true, payload: getPopupPayload() }))
+        .catch((error) =>
+          sendResponse({ ok: false, error: getErrorMessage(error), payload: getPopupPayload() })
+        );
+      return true;
+    }
+
     return false;
   });
 }
@@ -197,6 +507,103 @@ function buildUiHtml() {
       </div>
       <p id="${ids.message}" class="boc-message"></p>
     </aside>
+
+    <section id="${ids.readingView}" aria-hidden="true">
+      <div class="boc-reading-layout">
+        <aside class="boc-reading-rail">
+          <div class="boc-reading-eyebrow">章节</div>
+          <div id="${ids.readingChapterList}" class="boc-reading-list"></div>
+        </aside>
+
+        <section class="boc-reading-stage">
+          <header class="boc-reading-header">
+            <div class="boc-reading-header-copy">
+              <strong class="boc-reading-title">${escapeHtml(state.title || "B站字幕阅读")}</strong>
+              <div id="${ids.readingMeta}" class="boc-reading-meta">bilibili.com</div>
+            </div>
+            <div class="boc-reading-actions">
+              <button id="${ids.readingThemeSelect}" type="button" class="boc-reading-icon-btn" title="主题" aria-label="切换主题">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+              </button>
+              <button id="${ids.readingSettingsBtn}" type="button" class="boc-reading-icon-btn" title="设置" aria-label="设置">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <button id="${ids.readingCloseBtn}" type="button" class="boc-reading-icon-btn" title="退出" aria-label="退出阅读视图">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </header>
+
+          <section id="${ids.readingSettingsPanel}" class="boc-reading-panel boc-reading-settings-panel" hidden>
+            <section class="boc-reading-settings-group">
+              <div class="boc-reading-eyebrow">排版</div>
+              <div class="boc-reading-panel-row boc-reading-layout-toggles">
+                <button id="${ids.readingFontScaleSelect}" type="button" class="boc-reading-toggle-btn" title="字号">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><text x="12" y="17" font-size="13" font-weight="bold" text-anchor="middle" stroke="none" fill="currentColor">Aa</text></svg>
+                </button>
+                <button id="${ids.readingLetterSpacingSelect}" type="button" class="boc-reading-toggle-btn" title="字间距">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+                </button>
+                <button id="${ids.readingLineHeightSelect}" type="button" class="boc-reading-toggle-btn" title="行间距">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 4v16M10 4v16M14 4v16M18 4v16"/></svg>
+                </button>
+                <button id="${ids.readingContentWidthSelect}" type="button" class="boc-reading-toggle-btn" title="正文宽度">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h16v16H4z"/><path d="M9 9h6v6H9z"/></svg>
+                </button>
+              </div>
+            </section>
+
+            <section class="boc-reading-settings-group">
+              <div class="boc-reading-eyebrow">章节</div>
+              <div class="boc-reading-controls">
+                <select id="${ids.readingChapterVisibilitySelect}" class="boc-reading-select boc-reading-select-sm" aria-label="章节展示">
+                  <option value="show">展示</option>
+                  <option value="hide">隐藏</option>
+                  <option value="auto">自动</option>
+                </select>
+              </div>
+            </section>
+
+            <section class="boc-reading-settings-group">
+              <div class="boc-reading-controls">
+                <label class="boc-reading-toggle boc-reading-toggle-inline">
+                  <input id="${ids.readingAutoScroll}" type="checkbox" checked />
+                  <span>滚动</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="boc-reading-settings-group">
+              <div class="boc-reading-eyebrow">字幕</div>
+              <div class="boc-reading-controls">
+                <select id="${ids.readingSubtitleSelect}" class="boc-reading-select boc-reading-select-sm" aria-label="字幕语言">
+                </select>
+              </div>
+            </section>
+
+            <section class="boc-reading-settings-group boc-reading-info-group">
+              <div class="boc-reading-eyebrow">视频摘要</div>
+              <div id="${ids.readingInfoSummary}" class="boc-reading-info-list"></div>
+            </section>
+            <section class="boc-reading-settings-group boc-reading-info-group">
+              <div class="boc-reading-eyebrow">视频简介</div>
+              <div id="${ids.readingInfoDescription}" class="boc-reading-info-copy"></div>
+              <button id="${ids.readingDescriptionBtn}" type="button" class="boc-reading-text-btn">展开简介</button>
+            </section>
+          </section>
+
+          <p id="${ids.readingStatus}" class="boc-reading-status">使用页面原生播放器联动章节和字幕。</p>
+
+          <div class="boc-reading-player-shell">
+            <div id="${ids.readingPlayerSlot}" class="boc-reading-player-slot"></div>
+          </div>
+
+          <section class="boc-reading-main">
+            <div id="${ids.readingTranscriptList}" class="boc-reading-transcript"></div>
+          </section>
+        </section>
+      </div>
+    </section>
   `;
 }
 
@@ -209,6 +616,19 @@ function bindUiEvents() {
   const downloadBtn = byId(ids.downloadBtn);
   const sendBtn = byId(ids.sendBtn);
   const settingsBtn = byId(ids.settingsBtn);
+  const readingView = byId(ids.readingView);
+  const readingCloseBtn = byId(ids.readingCloseBtn);
+  const readingAutoScroll = byId(ids.readingAutoScroll);
+  const readingThemeSelect = byId(ids.readingThemeSelect);
+  const readingSettingsToggleBtn = byId(ids.readingSettingsBtn);
+  const readingFontScaleSelect = byId(ids.readingFontScaleSelect);
+  const readingLetterSpacingSelect = byId(ids.readingLetterSpacingSelect);
+  const readingLineHeightSelect = byId(ids.readingLineHeightSelect);
+  const readingContentWidthSelect = byId(ids.readingContentWidthSelect);
+  const readingChapterVisibilitySelect = byId(ids.readingChapterVisibilitySelect);
+  const readingDescriptionBtn = byId(ids.readingDescriptionBtn);
+  const chapterList = byId(ids.readingChapterList);
+  const transcriptList = byId(ids.readingTranscriptList);
 
   closeBtn.addEventListener("click", () => panel.classList.remove("open"));
   refreshBtn.addEventListener("click", refreshClip);
@@ -217,17 +637,155 @@ function bindUiEvents() {
   downloadBtn.addEventListener("click", downloadSubtitle);
   sendBtn.addEventListener("click", sendToObsidian);
   settingsBtn.addEventListener("click", requestOpenOptions);
+  readingCloseBtn.addEventListener("click", () => {
+    if (isReaderMode()) {
+      location.href = stripReaderModeUrl(location.href);
+      return;
+    }
+    closeReadingView();
+  });
+  readingAutoScroll.addEventListener("change", (event) => {
+    state.readingAutoScroll = Boolean(event.target.checked);
+    if (state.readingAutoScroll) {
+      state.readingManualScrollPauseUntil = 0;
+      syncReadingViewPlayback(true);
+    }
+    updateReaderFollowState();
+  });
+  readingThemeSelect.addEventListener("click", () => {
+    const themes = ["light", "dark", "paper"];
+    const current = state.readingTheme || "light";
+    const nextIndex = (themes.indexOf(current) + 1) % themes.length;
+    updateReaderPreferences({ readerTheme: themes[nextIndex] }, { persist: true });
+    readingThemeSelect.classList.add("is-active");
+    setTimeout(() => readingThemeSelect.classList.remove("is-active"), 300);
+  });
+  readingSettingsToggleBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.readingSettingsExpanded = !state.readingSettingsExpanded;
+    renderReaderPanels();
+  });
+  readingDescriptionBtn.addEventListener("click", () => {
+    state.readingDescriptionExpanded = !state.readingDescriptionExpanded;
+    renderReadingInfoPanel();
+  });
+  readingFontScaleSelect.addEventListener("click", () => {
+    const options = ["s", "m", "l"];
+    const current = state.readingFontScale || "m";
+    const nextIndex = (options.indexOf(current) + 1) % options.length;
+    updateReaderPreferences({ readerFontScale: options[nextIndex] }, { persist: true });
+  });
+  readingLetterSpacingSelect.addEventListener("click", () => {
+    const options = ["tight", "normal", "relaxed"];
+    const current = state.readingLetterSpacing || "normal";
+    const nextIndex = (options.indexOf(current) + 1) % options.length;
+    updateReaderPreferences({ readerLetterSpacing: options[nextIndex] }, { persist: true });
+  });
+  readingLineHeightSelect.addEventListener("click", () => {
+    const options = ["tight", "normal", "relaxed"];
+    const current = state.readingLineHeight || "tight";
+    const nextIndex = (options.indexOf(current) + 1) % options.length;
+    updateReaderPreferences({ readerLineHeight: options[nextIndex] }, { persist: true });
+  });
+  readingContentWidthSelect.addEventListener("click", () => {
+    const options = ["narrow", "medium", "wide"];
+    const current = state.readingContentWidth || "medium";
+    const nextIndex = (options.indexOf(current) + 1) % options.length;
+    updateReaderPreferences({ readerContentWidth: options[nextIndex] }, { persist: true });
+  });
+  readingChapterVisibilitySelect.addEventListener("change", (event) => {
+    updateReaderPreferences({ readerChapterVisibility: event.target.value }, { persist: true });
+  });
+
+  const readingSubtitleSelect = byId(ids.readingSubtitleSelect);
+  readingSubtitleSelect.addEventListener("change", (event) => {
+    const option = event.target.options[event.target.selectedIndex];
+    const url = String(option?.value || "");
+    if (!url) return;
+    loadSubtitle(url, String(option.dataset.lang || "unknown"), state.fetchRunId, String(option.dataset.id || ""))
+      .then(() => {
+        renderReadingView();
+        syncReadingViewPlayback(true);
+      })
+      .catch((error) => {
+        logWarn("[BOC] failed to switch subtitle in reading view", error);
+      });
+  });
+
+  // Click outside settings panel to close
+  if (!state.readingDocumentClickBound) {
+    document.addEventListener("click", (e) => {
+      if (!state.readingSettingsExpanded) return;
+      const settingsPanel = document.getElementById(ids.readingSettingsPanel);
+      const settingsBtnEl = document.getElementById(ids.readingSettingsBtn);
+      if (!settingsPanel || !settingsBtnEl) {
+        return;
+      }
+      if (!settingsPanel.contains(e.target) && !settingsBtnEl.contains(e.target)) {
+        state.readingSettingsExpanded = false;
+        renderReaderPanels();
+      }
+    });
+    state.readingDocumentClickBound = true;
+  }
+
+  const handleReaderManualScroll = () => {
+    if (Date.now() <= state.readingProgrammaticScrollUntil) {
+      return;
+    }
+    noteManualReaderInteraction();
+  };
+  transcriptList.addEventListener("scroll", handleReaderManualScroll);
+  transcriptList.addEventListener("wheel", handleReaderManualScroll, { passive: true });
+  chapterList.addEventListener("wheel", handleReaderManualScroll, { passive: true });
+  chapterList.addEventListener("pointerdown", () => noteManualReaderInteraction(3500));
+  transcriptList.addEventListener("pointerdown", () => noteManualReaderInteraction(3500));
+  chapterList.addEventListener("click", onReadingChapterClick);
+  transcriptList.addEventListener("click", onReadingTranscriptClick);
+  readingView.addEventListener("transitionend", () => {
+    if (!state.readingViewOpen) {
+      stopReadingViewSync();
+    }
+  });
 }
 
 function startUrlWatcher() {
+  if (state.urlWatcherStarted) {
+    return;
+  }
+  state.urlWatcherStarted = true;
+
   window.setInterval(() => {
-    if (location.href === state.currentUrl) {
+    const nextUrl = location.href;
+    const nextSignature = computeCurrentClipSignature();
+    if (nextUrl === state.currentUrl && nextSignature === state.currentClipSignature) {
       return;
     }
 
-    state.fetchRunId += 1;
-    state.currentUrl = location.href;
+    state.currentUrl = nextUrl;
+    state.currentClipSignature = nextSignature;
+    ensureUiReady();
     resetClipState();
+    const shouldEnterReaderMode = isReaderMode(nextUrl);
+    if (!state.readingViewOpen && shouldEnterReaderMode) {
+      document.documentElement.setAttribute("data-boc-reader-mode", "1");
+      document.body.setAttribute("data-boc-reader-mode", "1");
+      chrome.storage.local.remove("bocEnterReadingMode").catch(() => {});
+      renderReadingStatus("检测到阅读视图跳转，正在打开阅读模式...");
+      enterReaderMode().catch((error) => {
+        renderReadingStatus(`阅读视图启动失败：${getErrorMessage(error)}`);
+      });
+      return;
+    }
+    if (state.readingViewOpen || shouldEnterReaderMode) {
+      renderReadingStatus("检测到视频变化，正在自动刷新字幕...");
+      refreshClip().catch((error) => {
+        if (!isStaleRunError(error)) {
+          renderReadingStatus(`自动刷新失败：${getErrorMessage(error)}`);
+        }
+      });
+      return;
+    }
     setStatus("检测到页面变化，请点击“刷新抓取”加载当前视频字幕。");
   }, 1200);
 }
@@ -254,11 +812,21 @@ function resetClipState() {
   state.markdown = "";
   state.srt = "";
   state.txt = "";
+  state.currentClipSignature = computeCurrentClipSignature();
+  stopReadingViewSync();
+  state.readingActiveSubtitleIndex = -1;
+  state.readingActiveChapterIndex = -1;
+  state.readingVideoEl = null;
+  stopReaderPlayerObserver();
 
   renderMeta();
   renderSubtitleSelect();
   byId(ids.preview).value = "";
   setMessage("");
+  if (state.readingViewOpen) {
+    renderReadingView();
+    renderReadingStatus("请先点击“刷新抓取”加载当前视频字幕。");
+  }
 }
 
 async function refreshClip() {
@@ -294,6 +862,7 @@ async function refreshClip() {
     state.uploadDate = meta.uploadDate || readUploadDate();
     state.description = meta.description || "";
     state.pageCount = Array.isArray(meta.pages) ? meta.pages.length : 0;
+    state.currentClipSignature = computeCurrentClipSignature();
     let resolvedPageIndex = pageIndex;
     if ((meta.pages || []).length > 1 && !hasPageParam) {
       const pageIndexFromOid = pickPageIndexFromOid(meta.pages, oid);
@@ -421,6 +990,14 @@ async function refreshClip() {
     }
     renderMeta();
     renderSubtitleSelect();
+    if (state.readingViewOpen) {
+      moveReadingMainInline();
+      renderReadingView();
+      renderReadingStatus("抓取完成，阅读视图已同步最新字幕。");
+      startReadingViewSync();
+      startReaderPlayerObserver();
+      syncReadingViewPlayback(true);
+    }
     setStatus("抓取完成，可以复制、下载或发送到 Obsidian。");
   } catch (error) {
     if (isStaleRunError(error)) {
@@ -499,6 +1076,10 @@ async function loadSubtitle(url, lang, runId = state.fetchRunId, subtitleId = ""
         state.srt = buildSrt(cachedBody);
         state.txt = buildTxt(cachedBody, state.settings);
         byId(ids.preview).value = buildSubtitlePreview(cachedBody, state.settings);
+        if (state.readingViewOpen) {
+          renderReadingView();
+          syncReadingViewPlayback(true);
+        }
         return;
       }
     }
@@ -530,6 +1111,10 @@ async function loadSubtitle(url, lang, runId = state.fetchRunId, subtitleId = ""
   state.srt = buildSrt(body);
   state.txt = buildTxt(body, state.settings);
   byId(ids.preview).value = buildSubtitlePreview(body, state.settings);
+  if (state.readingViewOpen) {
+    renderReadingView();
+    syncReadingViewPlayback(true);
+  }
 }
 
 function getSubtitleCacheKey({ bvid, cid, subtitleId = "", subtitleUrl = "", lang = "" }) {
@@ -642,6 +1227,36 @@ function renderSubtitleSelect() {
       const label = item.lanDoc || item.lan || "unknown";
       const isAi = isAiSubtitle(item);
       const aiTag = isAi ? " [AI自动]" : "";
+      const optionLabel = `${label}${aiTag}`;
+      return `<option value="${escapeHtml(item.subtitleUrl)}" data-lang="${escapeHtml(
+        label
+      )}" data-id="${escapeHtml(String(item.id || ""))}" data-isai="${isAi}" ${selected}>${escapeHtml(
+        optionLabel
+      )}</option>`;
+    })
+    .join("");
+  select.disabled = false;
+}
+
+function renderReadingSubtitleSelect() {
+  const select = byId(ids.readingSubtitleSelect);
+  const subtitles = state.subtitles || [];
+
+  if (subtitles.length === 0) {
+    select.innerHTML = '<option value="">暂无字幕</option>';
+    select.disabled = true;
+    return;
+  }
+
+  select.innerHTML = subtitles
+    .map((item) => {
+      const selectedById =
+        state.selectedSubtitleId && String(item.id) === String(state.selectedSubtitleId);
+      const selectedByUrl = item.subtitleUrl === state.selectedSubtitleUrl;
+      const selected = selectedById || selectedByUrl ? "selected" : "";
+      const label = item.lanDoc || item.lan || "unknown";
+      const isAi = isAiSubtitle(item);
+      const aiTag = isAi ? " [AI]" : "";
       const optionLabel = `${label}${aiTag}`;
       return `<option value="${escapeHtml(item.subtitleUrl)}" data-lang="${escapeHtml(
         label
@@ -786,6 +1401,1666 @@ function setStatus(text) {
 function setMessage(text) {
   state.messageText = String(text || "");
   byId(ids.message).textContent = state.messageText;
+}
+
+async function enterReaderMode() {
+  const readingView = byId(ids.readingView);
+  state.readingViewOpen = true;
+  state.readingNativePageMode = true;
+  document.body.setAttribute("data-boc-reading-active", "1");
+  hydrateReaderStateFromSettings(state.settings);
+  applyReadingViewPresentation();
+  alignReaderViewportToPlayer();
+  await sleep(0);
+  readingView.classList.add("open", "reader-page");
+  readingView.setAttribute("aria-hidden", "false");
+  renderReadingStatus("正在准备播放器和字幕...");
+  applyReaderPageFocus();
+  renderReadingView();
+  await sleep(0);
+
+  // Try to mount player, with more retries for slower pages (like watch later)
+  const mounted = await ensureReaderPlayerMounted({ retries: 50, delayMs: 150, forceLayout: true });
+  if (!mounted) {
+    // Don't throw - keep UI open and keep retrying in background
+    renderReadingStatus("正在等待视频播放器就绪...");
+    scheduleReaderPlayerRetry();
+    return;
+  }
+
+  finishEnterReaderMode();
+}
+
+function scheduleReaderPlayerRetry() {
+  // Keep trying to mount player in background
+  const tryMount = async () => {
+    if (!state.readingViewOpen || !isReaderMode()) return;
+    const mounted = await ensureReaderPlayerMounted({ retries: 10, delayMs: 200, forceLayout: true });
+    if (mounted) {
+      finishEnterReaderMode();
+    } else if (state.readingViewOpen) {
+      setTimeout(tryMount, 500);
+    }
+  };
+  setTimeout(tryMount, 500);
+}
+
+function finishEnterReaderMode() {
+  if (!state.readingViewOpen || !isReaderMode()) return;
+
+  alignReaderViewportToPlayer();
+  moveReadingMainInline();
+  scheduleReaderMiniPlayerDismiss();
+
+  if (!state.subtitleBody.length) {
+    refreshClip().catch((error) => {
+      if (!isStaleRunError(error)) {
+        renderReadingStatus(`字幕加载失败：${getErrorMessage(error)}`);
+      }
+    });
+  }
+
+  startReadingViewSync();
+  startReaderPlayerObserver();
+  layoutReaderPlayerHost();
+  syncReadingViewPlayback(true);
+  updateReaderFollowState();
+  renderReadingStatus("阅读视图已就绪，播放视频时字幕会自动高亮。");
+}
+
+async function ensureReaderPlayerMounted({ retries = 1, delayMs = 100, forceLayout = false } = {}) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const video = getRuntimeVideoElement();
+    const playerHost = findReaderPlayerHost(video);
+    if (video && playerHost) {
+      const previousHost = state.readingPlayerHost;
+      const previousVideo = state.readingVideoEl;
+      video.controls = false;
+      video.removeAttribute("controls");
+      video.disablePictureInPicture = true;
+      video.setAttribute("disablepictureinpicture", "");
+      video.removeAttribute("autopictureinpicture");
+      state.readingPlayerHost = playerHost;
+      const miniPlayerClosed = dismissReaderMiniPlayer(playerHost);
+      if (miniPlayerClosed) {
+        await sleep(120);
+      }
+      const activeHost = findReaderPlayerHost(video) || playerHost;
+      state.readingPlayerHost = activeHost;
+      normalizeReaderPlayerContainer(activeHost);
+      if (state.readingNativePageMode) {
+        clearNativeReaderFloatingStyles(activeHost);
+        if (hasNativeReaderPlayerLayoutIssue(activeHost)) {
+          normalizeReaderPlayerContainer(activeHost);
+          clearNativeReaderFloatingStyles(activeHost);
+        }
+      }
+      if (previousHost && previousHost !== activeHost) {
+        cleanupReaderPlayerHostNode(previousHost);
+      }
+      if (previousVideo !== video) {
+        state.readingVideoEventsBound = false;
+      }
+      activeHost.classList.add("boc-reader-player-host");
+      bindReadingViewVideo(video);
+      bindReaderPlayerControlsHover(activeHost);
+      bindReaderLayout();
+      if (
+        forceLayout ||
+        previousHost !== activeHost ||
+        attempt > 0 ||
+        miniPlayerClosed ||
+        (state.readingNativePageMode && hasNativeReaderPlayerLayoutIssue(activeHost))
+      ) {
+        layoutReaderPlayerHost();
+        if (state.readingNativePageMode && hasNativeReaderPlayerLayoutIssue(activeHost)) {
+          normalizeReaderPlayerContainer(activeHost);
+          clearNativeReaderFloatingStyles(activeHost);
+          layoutReaderPlayerHost();
+        }
+      }
+      if (document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      }
+      return true;
+    }
+    await sleep(delayMs);
+  }
+  return false;
+}
+
+function queueEnsureReaderPlayerMounted() {
+  if (!state.readingViewOpen || !isReaderMode() || state.readingPlayerMountTimer) {
+    return;
+  }
+  state.readingPlayerMountTimer = window.setTimeout(() => {
+    state.readingPlayerMountTimer = 0;
+    ensureReaderPlayerMounted({ retries: 12, delayMs: 120, forceLayout: true }).catch((error) => {
+      logWarn("[BOC] ensure reader player mounted failed", error);
+    });
+  }, 60);
+}
+
+function findReaderPlayerHost(video) {
+  if (!video) {
+    return null;
+  }
+
+  return (
+    video.closest(".bpx-player-container") ||
+    video.closest(".bpx-player-video-area") ||
+    video.closest("#bilibili-player") ||
+    video.parentElement
+  );
+}
+
+async function openReadingView() {
+  if (!extractBvid(location.href)) {
+    throw new Error("当前网页不支持阅读视图。");
+  }
+
+  if (!state.subtitleBody.length) {
+    await refreshClip();
+  }
+
+  const video = bindReadingViewVideo();
+  if (!video) {
+    throw new Error("当前页面没有找到可联动的视频播放器。");
+  }
+  if (!state.subtitleBody.length) {
+    throw new Error("当前视频暂时没有可用字幕。");
+  }
+
+  state.readingViewOpen = true;
+  state.readingNativePageMode = false;
+  document.body.setAttribute("data-boc-reading-active", "1");
+  hydrateReaderStateFromSettings(state.settings);
+  applyReadingViewPresentation();
+  const readingView = byId(ids.readingView);
+  readingView.classList.add("open");
+  readingView.setAttribute("aria-hidden", "false");
+  moveReadingMainInline();
+  renderReadingView();
+  renderReadingStatus("已连接页面原生播放器，点击章节或字幕可跳转。");
+  startReadingViewSync();
+  syncReadingViewPlayback(true);
+}
+
+function closeReadingView() {
+  state.readingViewOpen = false;
+  state.readingNativePageMode = false;
+  state.readingSettingsExpanded = false;
+  state.readingManualScrollPauseUntil = 0;
+  state.readingProgrammaticScrollUntil = 0;
+  state.readingNextScrollBehavior = "smooth";
+  const readingView = byId(ids.readingView);
+  readingView.classList.remove("open", "reader-page");
+  readingView.setAttribute("aria-hidden", "true");
+  readingView.removeAttribute("data-boc-reader-follow");
+  document.body.removeAttribute("data-boc-reading-active");
+  document.documentElement.removeAttribute("data-boc-reader-theme");
+  document.documentElement.removeAttribute("data-boc-reader-font-scale");
+  document.documentElement.removeAttribute("data-boc-reader-letter-spacing");
+  document.documentElement.removeAttribute("data-boc-reader-line-height");
+  document.documentElement.removeAttribute("data-boc-reader-content-width");
+  document.documentElement.removeAttribute("data-boc-reader-chapter-visibility");
+  document.documentElement.removeAttribute("data-boc-reader-has-chapters");
+  document.body.removeAttribute("data-boc-reader-theme");
+  document.body.removeAttribute("data-boc-reader-font-scale");
+  document.body.removeAttribute("data-boc-reader-letter-spacing");
+  document.body.removeAttribute("data-boc-reader-line-height");
+  document.body.removeAttribute("data-boc-reader-content-width");
+  document.body.removeAttribute("data-boc-reader-chapter-visibility");
+  document.body.removeAttribute("data-boc-reader-has-chapters");
+  restoreReadingMainInline();
+  stopReadingViewSync();
+  unbindReaderLayout();
+  cleanupReaderPlayerHost();
+  clearReaderPageFocus();
+}
+
+function renderReadingView() {
+  const titleNode = document.querySelector(".boc-reading-title");
+  const metaNode = byId(ids.readingMeta);
+  const chapterList = byId(ids.readingChapterList);
+  const transcriptList = byId(ids.readingTranscriptList);
+  const chapters = normalizeChapters(state.chapters || []);
+  const body = Array.isArray(state.subtitleBody) ? state.subtitleBody : [];
+  const transcriptItems = getReadingTranscriptItems();
+  const withHours = shouldShowHoursInNote(state, body);
+  const hasChapters = chapters.length > 0;
+
+  if (titleNode) {
+    titleNode.textContent = state.title || "B站字幕阅读";
+  }
+  if (metaNode) {
+    metaNode.textContent = buildReadingMetaLine();
+  }
+
+  if (chapters.length === 0) {
+    chapterList.innerHTML = '<div class="boc-reading-empty">当前视频没有章节。</div>';
+  } else {
+    chapterList.innerHTML = chapters
+      .map(
+        (item, index) => `
+          <button
+            type="button"
+            class="boc-reading-chapter"
+            data-index="${index}"
+            data-seconds="${Number(item.from || 0) || 0}"
+          >
+            <span class="boc-reading-chapter-time">${escapeHtml(
+              formatCompactTimestamp(item.from, withHours)
+            )}</span>
+            <span class="boc-reading-chapter-title">${escapeHtml(item.title)}</span>
+          </button>
+        `
+      )
+      .join("");
+  }
+
+  if (transcriptItems.length === 0) {
+    transcriptList.innerHTML = '<div class="boc-reading-empty">当前视频还没有可读字幕。</div>';
+  } else {
+    transcriptList.innerHTML = transcriptItems
+      .map(
+        (item) => `
+          <button
+            type="button"
+            class="boc-reading-item"
+            data-index="${item.index}"
+            data-seconds="${item.from}"
+          >
+            <span class="boc-reading-time">${escapeHtml(
+              formatCompactTimestamp(item.from, withHours)
+            )}</span>
+            <span class="boc-reading-text">${escapeHtml(item.content)}</span>
+          </button>
+        `
+      )
+      .join("");
+    transcriptList.insertAdjacentHTML(
+      "beforeend",
+      `<div id="${ids.readingTranscriptTailSpacer}" class="boc-reading-tail-spacer" aria-hidden="true"></div>`
+    );
+  }
+
+  updateReaderChapterPresence(hasChapters);
+  renderReadingInfoPanel();
+  renderReadingSubtitleSelect();
+  renderReaderPanels();
+  applyReadingViewPresentation();
+  updateReadingTranscriptTailSpacer();
+  state.readingActiveSubtitleIndex = -1;
+  state.readingActiveChapterIndex = -1;
+}
+
+function getReadingTranscriptItems(body = state.subtitleBody) {
+  return (Array.isArray(body) ? body : [])
+    .map((item, index) => ({
+      index,
+      from: Number(item?.from || 0) || 0,
+      to: Number(item?.to || 0) || 0,
+      content: String(item?.content || "").trim()
+    }))
+    .filter((item) => item.content);
+}
+
+function updateReadingTranscriptTailSpacer() {
+  const spacer = document.getElementById(ids.readingTranscriptTailSpacer);
+  if (!spacer) {
+    return;
+  }
+  const inlineHost = document.getElementById("boc-reading-inline-host");
+  const transcriptList = document.getElementById(ids.readingTranscriptList);
+  const hostHeight = inlineHost?.clientHeight || transcriptList?.clientHeight || 0;
+  const spacerHeight = Math.max(hostHeight, Math.round(window.innerHeight * 0.92), 320);
+  spacer.style.height = `${spacerHeight}px`;
+}
+
+function hydrateReaderStateFromSettings(settings = state.settings) {
+  state.readingTheme = normalizeReaderTheme(settings?.readerTheme);
+  state.readingFontScale = normalizeReaderFontScale(settings?.readerFontScale);
+  state.readingLetterSpacing = normalizeReaderLetterSpacing(settings?.readerLetterSpacing ?? settings?.readerLineHeight);
+  state.readingLineHeight = normalizeReaderLineHeight(settings?.readerLineHeight);
+  state.readingContentWidth = normalizeReaderContentWidth(settings?.readerContentWidth);
+  state.readingChapterVisibility = normalizeReaderChapterVisibility(settings?.readerChapterVisibility);
+}
+
+function applyReadingViewPresentation() {
+  const readingView = byId(ids.readingView);
+  readingView.dataset.theme = state.readingTheme;
+  readingView.dataset.fontScale = state.readingFontScale;
+  readingView.dataset.letterSpacing = state.readingLetterSpacing;
+  readingView.dataset.lineHeight = state.readingLineHeight;
+  readingView.dataset.contentWidth = state.readingContentWidth;
+  readingView.dataset.chapterVisibility = state.readingChapterVisibility;
+  document.documentElement.dataset.bocReaderTheme = state.readingTheme;
+  document.documentElement.dataset.bocReaderFontScale = state.readingFontScale;
+  document.documentElement.dataset.bocReaderLetterSpacing = state.readingLetterSpacing;
+  document.documentElement.dataset.bocReaderLineHeight = state.readingLineHeight;
+  document.documentElement.dataset.bocReaderContentWidth = state.readingContentWidth;
+  document.documentElement.dataset.bocReaderChapterVisibility = state.readingChapterVisibility;
+  document.body.dataset.bocReaderTheme = state.readingTheme;
+  document.body.dataset.bocReaderFontScale = state.readingFontScale;
+  document.body.dataset.bocReaderLetterSpacing = state.readingLetterSpacing;
+  document.body.dataset.bocReaderLineHeight = state.readingLineHeight;
+  document.body.dataset.bocReaderContentWidth = state.readingContentWidth;
+  document.body.dataset.bocReaderChapterVisibility = state.readingChapterVisibility;
+  byId(ids.readingChapterVisibilitySelect).value = state.readingChapterVisibility;
+}
+
+function updateReaderChapterPresence(hasChapters) {
+  const value = hasChapters ? "1" : "0";
+  const readingView = byId(ids.readingView);
+  readingView.dataset.hasChapters = value;
+  document.documentElement.dataset.bocReaderHasChapters = value;
+  document.body.dataset.bocReaderHasChapters = value;
+}
+
+function getToggleLabel(key, value) {
+  const labels = {
+    letterSpacing: { tight: "紧", normal: "中", relaxed: "松" },
+    lineHeight: { tight: "紧", normal: "中", relaxed: "松" },
+    contentWidth: { narrow: "窄", medium: "中", wide: "宽" }
+  };
+  return labels[key]?.[value] || "中";
+}
+
+function renderReaderPanels() {
+  const settingsPanel = byId(ids.readingSettingsPanel);
+  const settingsBtn = byId(ids.readingSettingsBtn);
+  settingsPanel.hidden = !state.readingSettingsExpanded;
+  settingsBtn.classList.toggle("is-active", state.readingSettingsExpanded);
+}
+
+function renderReadingInfoPanel() {
+  const summaryNode = byId(ids.readingInfoSummary);
+  const descriptionNode = byId(ids.readingInfoDescription);
+  const descriptionBtn = byId(ids.readingDescriptionBtn);
+  const summaryItems = buildReadingSummaryItems();
+  const description = String(state.description || "").trim();
+
+  summaryNode.innerHTML =
+    summaryItems.length === 0
+      ? '<div class="boc-reading-empty">当前视频信息还未就绪。</div>'
+      : summaryItems
+          .map(
+            (item) => `
+              <div class="boc-reading-info-item">
+                <span class="boc-reading-info-label">${escapeHtml(item.label)}</span>
+                <span class="boc-reading-info-value">${escapeHtml(item.value)}</span>
+              </div>
+            `
+          )
+          .join("");
+
+  if (!description) {
+    descriptionNode.innerHTML = '<div class="boc-reading-empty">当前视频没有简介。</div>';
+    descriptionBtn.hidden = true;
+  } else {
+    const shortText = description.length > 220 && !state.readingDescriptionExpanded ? `${description.slice(0, 220)}...` : description;
+    descriptionNode.textContent = shortText;
+    descriptionBtn.hidden = description.length <= 220;
+    descriptionBtn.textContent = state.readingDescriptionExpanded ? "收起简介" : "展开简介";
+  }
+}
+
+function buildReadingSummaryItems() {
+  const items = [];
+  if (state.title) {
+    items.push({ label: "标题", value: state.title });
+  }
+  if (state.author) {
+    items.push({ label: "作者", value: state.author });
+  }
+  if (state.uploadDate) {
+    items.push({ label: "日期", value: state.uploadDate });
+  }
+  items.push({ label: "来源", value: "bilibili.com" });
+  if (Number(state.pageCount) > 1) {
+    const pageParts = [`P${Number(state.pageIndex) > 0 ? Number(state.pageIndex) : 1}`];
+    if (state.pageTitle) {
+      pageParts.push(state.pageTitle);
+    }
+    items.push({ label: "分P", value: pageParts.join(" ") });
+  }
+  if (state.selectedSubtitleLang) {
+    items.push({ label: "字幕", value: state.selectedSubtitleLang });
+  }
+  return items;
+}
+
+function updateReaderPreferences(next, { persist = true } = {}) {
+  state.readingTheme = normalizeReaderTheme(next.readerTheme ?? state.readingTheme);
+  state.readingFontScale = normalizeReaderFontScale(next.readerFontScale ?? state.readingFontScale);
+  state.readingLetterSpacing = normalizeReaderLetterSpacing(
+    next.readerLetterSpacing ?? state.readingLetterSpacing
+  );
+  state.readingLineHeight = normalizeReaderLineHeight(next.readerLineHeight ?? state.readingLineHeight);
+  state.readingContentWidth = normalizeReaderContentWidth(next.readerContentWidth ?? state.readingContentWidth);
+  state.readingChapterVisibility = normalizeReaderChapterVisibility(
+    next.readerChapterVisibility ?? state.readingChapterVisibility
+  );
+  state.settings = {
+    ...state.settings,
+    readerTheme: state.readingTheme,
+    readerFontScale: state.readingFontScale,
+    readerLetterSpacing: state.readingLetterSpacing,
+    readerLineHeight: state.readingLineHeight,
+    readerContentWidth: state.readingContentWidth,
+    readerChapterVisibility: state.readingChapterVisibility
+  };
+  applyReadingViewPresentation();
+  if (persist) {
+    persistReaderSettings();
+  }
+}
+
+function persistReaderSettings() {
+  sendRuntimeMessage({ type: "save-settings", settings: state.settings }).catch((error) => {
+    logWarn("[BOC] failed to persist reader settings", error);
+  });
+}
+
+function buildReadingMetaLine() {
+  const parts = [];
+  if (state.author) {
+    parts.push(state.author);
+  }
+  if (state.uploadDate) {
+    parts.push(state.uploadDate);
+  }
+  parts.push("bilibili.com");
+  if (Number(state.pageCount) > 1) {
+    const pageParts = [`P${Number(state.pageIndex) > 0 ? Number(state.pageIndex) : 1}`];
+    if (state.pageTitle) {
+      pageParts.push(state.pageTitle);
+    }
+    parts.push(pageParts.join(" "));
+  }
+  if (state.selectedSubtitleLang) {
+    parts.push(`字幕：${state.selectedSubtitleLang}`);
+  }
+  return parts.join(" · ");
+}
+
+function renderReadingStatus(text) {
+  byId(ids.readingStatus).textContent = String(text || "");
+}
+
+function bindReaderLayout() {
+  if (state.readingLayoutBound) {
+    return;
+  }
+  window.addEventListener("resize", layoutReaderPlayerHost);
+  window.addEventListener("scroll", layoutReaderPlayerHost, { passive: true });
+  document.addEventListener("fullscreenchange", layoutReaderPlayerHost);
+  document.addEventListener("webkitfullscreenchange", layoutReaderPlayerHost);
+  state.readingLayoutBound = true;
+}
+
+function unbindReaderLayout() {
+  if (!state.readingLayoutBound) {
+    return;
+  }
+  window.removeEventListener("resize", layoutReaderPlayerHost);
+  window.removeEventListener("scroll", layoutReaderPlayerHost);
+  document.removeEventListener("fullscreenchange", layoutReaderPlayerHost);
+  document.removeEventListener("webkitfullscreenchange", layoutReaderPlayerHost);
+  state.readingLayoutBound = false;
+}
+
+function layoutReaderPlayerHost() {
+  if (!state.readingViewOpen || !isReaderMode()) {
+    return;
+  }
+
+  const readingView = byId(ids.readingView);
+  const playerHost = state.readingPlayerHost;
+  const slot = byId(ids.readingPlayerSlot);
+  if (!playerHost) {
+    return;
+  }
+
+  if (state.readingNativePageMode) {
+    const rect = playerHost.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) {
+      return;
+    }
+
+    const video = state.readingVideoEl;
+    let renderedWidth = rect.width;
+    let renderedHeight = rect.height;
+    if (Number(video?.videoWidth) > 0 && Number(video?.videoHeight) > 0) {
+      const aspectRatio = Number(video.videoWidth) / Number(video.videoHeight);
+      if (aspectRatio > 0) {
+        const hostAspectRatio = rect.width / rect.height;
+        if (hostAspectRatio > aspectRatio) {
+          renderedHeight = rect.height;
+          renderedWidth = rect.height * aspectRatio;
+        } else {
+          renderedWidth = rect.width;
+          renderedHeight = rect.width / aspectRatio;
+        }
+      }
+    }
+
+    const widthLimit = getReaderMainWidthLimit();
+    if (renderedWidth > widthLimit) {
+      const scale = widthLimit / renderedWidth;
+      renderedWidth = widthLimit;
+      renderedHeight *= scale;
+    }
+
+    clearNativeReaderFloatingStyles(playerHost);
+    cleanupReaderPlayerHostNode(playerHost);
+    readingView.style.setProperty("--boc-reader-player-rendered-width", `${Math.round(renderedWidth)}px`);
+    readingView.style.setProperty("--boc-reader-player-rendered-height", `${Math.round(renderedHeight)}px`);
+    updateReadingTranscriptTailSpacer();
+    return;
+  }
+
+  if (!slot) {
+    return;
+  }
+
+  const rect = slot.getBoundingClientRect();
+  if (!(rect.width > 0) || !(rect.height > 0)) {
+    return;
+  }
+
+  const video = state.readingVideoEl;
+  const aspectRatio =
+    Number(video?.videoWidth) > 0 && Number(video?.videoHeight) > 0
+      ? Number(video.videoWidth) / Number(video.videoHeight)
+      : 16 / 9;
+  const targetHeight = rect.height;
+  const targetWidth = Math.min(rect.width, targetHeight * aspectRatio);
+  const left = rect.left + (rect.width - targetWidth) / 2;
+
+  readingView.style.setProperty("--boc-reader-player-rendered-width", `${Math.round(targetWidth)}px`);
+  readingView.style.setProperty("--boc-reader-player-rendered-height", `${Math.round(targetHeight)}px`);
+  playerHost.style.setProperty("position", "fixed", "important");
+  playerHost.style.setProperty("left", `${Math.round(left)}px`, "important");
+  playerHost.style.setProperty("top", `${Math.round(rect.top)}px`, "important");
+  playerHost.style.setProperty("width", `${Math.round(targetWidth)}px`, "important");
+  playerHost.style.setProperty("height", `${Math.round(targetHeight)}px`, "important");
+  playerHost.style.setProperty("margin", "0", "important");
+  playerHost.style.setProperty("z-index", "2147483647", "important");
+  playerHost.style.setProperty("max-width", "none", "important");
+  playerHost.style.setProperty("max-height", "none", "important");
+  updateReadingTranscriptTailSpacer();
+}
+
+function cleanupReaderPlayerHostNode(playerHost) {
+  if (!playerHost) {
+    return;
+  }
+  playerHost.classList.remove("boc-reader-player-host");
+  playerHost.style.removeProperty("position");
+  playerHost.style.removeProperty("inset");
+  playerHost.style.removeProperty("left");
+  playerHost.style.removeProperty("top");
+  playerHost.style.removeProperty("right");
+  playerHost.style.removeProperty("bottom");
+  playerHost.style.removeProperty("transform");
+  playerHost.style.removeProperty("width");
+  playerHost.style.removeProperty("height");
+  playerHost.style.removeProperty("margin");
+  playerHost.style.removeProperty("z-index");
+  playerHost.style.removeProperty("max-width");
+  playerHost.style.removeProperty("max-height");
+}
+
+function cleanupReaderPlayerHost() {
+  restoreReaderPlayerContainer();
+  unbindReaderPlayerControlsHover();
+  const readingView = byId(ids.readingView);
+  readingView?.style.removeProperty("--boc-reader-player-rendered-width");
+  readingView?.style.removeProperty("--boc-reader-player-rendered-height");
+  const playerHost = state.readingPlayerHost;
+  if (!playerHost) {
+    return;
+  }
+  cleanupReaderPlayerHostNode(playerHost);
+  state.readingPlayerHost = null;
+}
+
+function startReadingViewSync() {
+  if (state.readingSyncTimer) {
+    window.clearInterval(state.readingSyncTimer);
+  }
+  state.readingSyncTimer = window.setInterval(() => {
+    syncReadingViewPlayback();
+  }, 250);
+}
+
+function stopReadingViewSync() {
+  if (state.readingSyncTimer) {
+    window.clearInterval(state.readingSyncTimer);
+    state.readingSyncTimer = 0;
+  }
+  if (state.readingMiniDismissTimer) {
+    window.clearTimeout(state.readingMiniDismissTimer);
+    state.readingMiniDismissTimer = 0;
+  }
+  if (state.readingControlsHideTimer) {
+    window.clearTimeout(state.readingControlsHideTimer);
+    state.readingControlsHideTimer = 0;
+  }
+  if (state.readingPlayerMountTimer) {
+    window.clearTimeout(state.readingPlayerMountTimer);
+    state.readingPlayerMountTimer = 0;
+  }
+  stopReaderPlayerObserver();
+  unbindReaderPlayerControlsHover();
+  if (state.readingVideoEl && state.readingVideoEl.__bocReadingSyncHandler) {
+    const video = state.readingVideoEl;
+    video.removeEventListener("timeupdate", video.__bocReadingSyncHandler);
+    video.removeEventListener("seeked", video.__bocReadingSyncHandler);
+    video.removeEventListener("loadedmetadata", video.__bocReadingSyncHandler);
+    delete video.__bocReadingSyncHandler;
+  }
+  state.readingVideoEventsBound = false;
+}
+
+function startReaderPlayerObserver() {
+  if (!isReaderMode() || state.readingPlayerObserver || !document.body) {
+    return;
+  }
+  const observer = new MutationObserver(() => {
+    if (!state.readingViewOpen) {
+      return;
+    }
+    const nextVideo = getRuntimeVideoElement();
+    const nextHost = findReaderPlayerHost(nextVideo);
+    if (nextVideo && nextHost && (nextVideo !== state.readingVideoEl || nextHost !== state.readingPlayerHost)) {
+      queueEnsureReaderPlayerMounted();
+    }
+    if (document.querySelector(".bpx-player-mini-close, .bpx-player-mini-warp")) {
+      scheduleReaderMiniPlayerDismiss();
+    }
+  });
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+  state.readingPlayerObserver = observer;
+}
+
+function stopReaderPlayerObserver() {
+  if (state.readingPlayerObserver) {
+    state.readingPlayerObserver.disconnect();
+    state.readingPlayerObserver = null;
+  }
+}
+
+function bindReadingViewVideo(video = getRuntimeVideoElement()) {
+  if (!video) {
+    if (state.readingVideoEl && state.readingVideoEl.__bocReadingSyncHandler) {
+      const prev = state.readingVideoEl;
+      prev.removeEventListener("timeupdate", prev.__bocReadingSyncHandler);
+      prev.removeEventListener("seeked", prev.__bocReadingSyncHandler);
+      prev.removeEventListener("loadedmetadata", prev.__bocReadingSyncHandler);
+      delete prev.__bocReadingSyncHandler;
+    }
+    state.readingVideoEl = null;
+    state.readingVideoEventsBound = false;
+    return null;
+  }
+
+  if (state.readingVideoEl === video && state.readingVideoEventsBound) {
+    return video;
+  }
+
+  if (state.readingVideoEl && state.readingVideoEl.__bocReadingSyncHandler) {
+    const prev = state.readingVideoEl;
+    prev.removeEventListener("timeupdate", prev.__bocReadingSyncHandler);
+    prev.removeEventListener("seeked", prev.__bocReadingSyncHandler);
+    prev.removeEventListener("loadedmetadata", prev.__bocReadingSyncHandler);
+  }
+
+  const syncHandler = (event) => {
+    if (state.readingViewOpen) {
+      if (event?.type === "loadedmetadata") {
+        layoutReaderPlayerHost();
+      }
+      if (event?.type === "seeked") {
+        state.readingNextScrollBehavior = "auto";
+      }
+      const latestHost = findReaderPlayerHost(video);
+      if (latestHost && latestHost !== state.readingPlayerHost) {
+        queueEnsureReaderPlayerMounted();
+      }
+      syncReadingViewPlayback();
+    }
+  };
+  video.addEventListener("timeupdate", syncHandler);
+  video.addEventListener("seeked", syncHandler);
+  video.addEventListener("loadedmetadata", syncHandler);
+  video.__bocReadingSyncHandler = syncHandler;
+  state.readingVideoEl = video;
+  state.readingPlayerHost = findReaderPlayerHost(video) || state.readingPlayerHost;
+  state.readingVideoEventsBound = true;
+  return video;
+}
+
+function getRuntimeVideoElement() {
+  if (state.readingVideoEl?.isConnected) {
+    const currentHost = findReaderPlayerHost(state.readingVideoEl);
+    const currentRect = state.readingVideoEl.getBoundingClientRect();
+    if (
+      currentHost?.isConnected &&
+      currentRect.width > 120 &&
+      currentRect.height > 68 &&
+      !isIgnoredReaderVideoCandidate(state.readingVideoEl)
+    ) {
+      return state.readingVideoEl;
+    }
+  }
+
+  const candidates = Array.from(document.querySelectorAll("video")).filter(
+    (item) => item.isConnected && !isIgnoredReaderVideoCandidate(item)
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const visible = candidates
+    .map((item) => {
+      const rect = item.getBoundingClientRect();
+      const host = findReaderPlayerHost(item);
+      const inPlayer = Boolean(
+        host &&
+          (host.matches?.("#bilibili-player, .bpx-player-container, .bpx-player-video-area") ||
+            host.querySelector?.(".bpx-player-video-area"))
+      );
+      const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+      const score =
+        area +
+        (inPlayer ? 1000000 : 0) +
+        (!item.paused ? 20000 : 0) +
+        Number(item.readyState || 0) * 2000 +
+        (item.currentSrc ? 10000 : 0) +
+        (item === state.readingVideoEl ? 500 : 0);
+      return { item, rect, score };
+    })
+    .filter(({ rect }) => rect.width > 240 && rect.height > 120)
+    .sort((a, b) => b.score - a.score)[0];
+
+  return visible?.item || candidates[0] || null;
+}
+
+function isIgnoredReaderVideoCandidate(video) {
+  if (!video) {
+    return true;
+  }
+  const host = findReaderPlayerHost(video);
+  const blockedSelector = [
+    "[data-boc-reader-hidden='1']",
+    ".bpx-player-mini-warp",
+    ".bpx-player-mini-close",
+    ".bpx-player-ending-panel",
+    ".bpx-player-ending-related",
+    "[class*='mini-player']",
+    "[class*='picture-in-picture']",
+    "[class*='adcard']",
+    ".ad-report",
+    "[class*='ad-report']",
+    ".video-page-card-small",
+    ".video-page-special-card-small",
+    ".feed-card",
+    ".bili-video-card"
+  ].join(", ");
+  return Boolean(video.closest(blockedSelector) || host?.closest?.(blockedSelector));
+}
+
+function applyReaderPageFocus() {
+  clearReaderPageFocus();
+
+  const root = byId(ids.root);
+  const video = getRuntimeVideoElement();
+  const playerHost = findReaderPlayerHost(video);
+  const titleNode = findReaderTitleContainer();
+  const keepRoots = [root, playerHost, titleNode].filter(Boolean);
+
+  keepRoots.forEach((node) => {
+    markReaderKeepSubtree(node);
+    markReaderKeepPath(node);
+  });
+
+  const keepNodes = Array.from(document.querySelectorAll("[data-boc-reader-keep='1']"));
+  keepNodes.forEach((parent) => {
+    Array.from(parent.children || []).forEach((child) => {
+      if (child.id === ids.root) {
+        return;
+      }
+      if (!child.hasAttribute("data-boc-reader-keep")) {
+        child.setAttribute("data-boc-reader-hidden", "1");
+      }
+    });
+  });
+
+  pruneReaderNonKeepBranches(document.body);
+  hideReaderNoiseNodes(keepRoots);
+}
+
+function clearReaderPageFocus() {
+  document.querySelectorAll("[data-boc-reader-keep]").forEach((node) => {
+    node.removeAttribute("data-boc-reader-keep");
+  });
+  document.querySelectorAll("[data-boc-reader-hidden]").forEach((node) => {
+    node.removeAttribute("data-boc-reader-hidden");
+  });
+}
+
+function moveReadingMainInline() {
+  if (!isReaderMode()) {
+    return;
+  }
+
+  const readingMain = document.querySelector(".boc-reading-main");
+  if (!readingMain) {
+    return;
+  }
+
+  if (!state.readingMainOriginalParent) {
+    state.readingMainOriginalParent = readingMain.parentElement;
+    state.readingMainOriginalNextSibling = readingMain.nextSibling;
+  }
+  const playerWrap =
+    document.getElementById("playerWrap") ||
+    state.readingPlayerHost?.closest?.("#playerWrap") ||
+    state.readingPlayerHost;
+  const hostParent = playerWrap?.parentElement;
+  if (!playerWrap || !hostParent) {
+    return;
+  }
+
+  let inlineHost = document.getElementById("boc-reading-inline-host");
+  if (!inlineHost) {
+    inlineHost = document.createElement("div");
+    inlineHost.id = "boc-reading-inline-host";
+  }
+
+  if (inlineHost.parentElement !== hostParent || inlineHost.previousElementSibling !== playerWrap) {
+    playerWrap.insertAdjacentElement("afterend", inlineHost);
+  }
+
+  if (!inlineHost.dataset.bocScrollBound) {
+    const handleInlineHostManualScroll = () => {
+      if (Date.now() <= state.readingProgrammaticScrollUntil) {
+        return;
+      }
+      noteManualReaderInteraction();
+    };
+    inlineHost.addEventListener("scroll", handleInlineHostManualScroll);
+    inlineHost.addEventListener("wheel", handleInlineHostManualScroll, { passive: true });
+    inlineHost.dataset.bocScrollBound = "1";
+  }
+
+  if (readingMain.parentElement !== inlineHost) {
+    inlineHost.appendChild(readingMain);
+  }
+  updateReadingTranscriptTailSpacer();
+}
+
+function restoreReadingMainInline() {
+  const readingMain = document.querySelector(".boc-reading-main");
+  const inlineHost = document.getElementById("boc-reading-inline-host");
+  if (readingMain && state.readingMainOriginalParent) {
+    if (state.readingMainOriginalNextSibling?.parentNode === state.readingMainOriginalParent) {
+      state.readingMainOriginalParent.insertBefore(readingMain, state.readingMainOriginalNextSibling);
+    } else {
+      state.readingMainOriginalParent.appendChild(readingMain);
+    }
+  }
+  inlineHost?.remove();
+  state.readingMainOriginalParent = null;
+  state.readingMainOriginalNextSibling = null;
+}
+
+function pruneReaderNonKeepBranches(node) {
+  if (!node?.children?.length) {
+    return;
+  }
+
+  Array.from(node.children).forEach((child) => {
+    if (child.id === ids.root) {
+      return;
+    }
+    const childHasKeep = child.hasAttribute("data-boc-reader-keep");
+    const childContainsKeep = Boolean(child.querySelector?.("[data-boc-reader-keep='1']"));
+    if (!childHasKeep && !childContainsKeep) {
+      child.setAttribute("data-boc-reader-hidden", "1");
+      return;
+    }
+    pruneReaderNonKeepBranches(child);
+  });
+}
+
+function hideReaderNoiseNodes(keepRoots = []) {
+  const keepSet = new Set(keepRoots.filter(Boolean));
+  const selectors = [
+    ".strip-ad-inner",
+    ".inside-wrp",
+    ".inside-bg",
+    ".hinter-msg",
+    ".slide",
+    ".cover.b-img",
+    ".cover.b-img.sleepy",
+    ".b-img.clickable",
+    "[class*='activity']",
+    "[class*='adcard']"
+  ];
+
+  document.querySelectorAll(selectors.join(",")).forEach((node) => {
+    if (Array.from(keepSet).some((keepNode) => keepNode === node || node.contains(keepNode))) {
+      return;
+    }
+    if (
+      node.closest(
+        "#bilibili-player, .bpx-player-container, .bpx-player-video-area, .bpx-player-primary-area, #boc-root, h1.video-title, .video-info-detail, .video-info-meta, .video-data"
+      )
+    ) {
+      return;
+    }
+    node.setAttribute("data-boc-reader-hidden", "1");
+    const card = node.closest("article, li, .card-box, .video-page-card-small, .video-page-special-card-small, .feed-card, .bili-video-card");
+    if (card && !card.closest("#bilibili-player, .bpx-player-container, .bpx-player-video-area, .bpx-player-primary-area, #boc-root")) {
+      card.setAttribute("data-boc-reader-hidden", "1");
+    }
+  });
+}
+
+function markReaderKeepSubtree(node) {
+  if (!node) {
+    return;
+  }
+  node.setAttribute("data-boc-reader-keep", "1");
+  node.querySelectorAll("*").forEach((child) => {
+    child.setAttribute("data-boc-reader-keep", "1");
+  });
+}
+
+function markReaderKeepPath(node) {
+  let current = node;
+  while (current && current !== document.body) {
+    current.setAttribute("data-boc-reader-keep", "1");
+    current = current.parentElement;
+  }
+  document.body.setAttribute("data-boc-reader-keep", "1");
+}
+
+function findReaderTitleContainer() {
+  const title =
+    document.querySelector("h1.video-title") ||
+    document.querySelector("h1") ||
+    document.querySelector("[data-title]");
+  if (!title) {
+    return null;
+  }
+  return title;
+}
+
+function findReaderMetaContainer(titleNode = findReaderTitleContainer()) {
+  const title = titleNode?.matches?.("h1, [data-title]") ? titleNode : titleNode?.querySelector?.("h1, [data-title]");
+  if (!title) {
+    return null;
+  }
+
+  const candidates = [
+    title.nextElementSibling,
+    title.parentElement?.nextElementSibling,
+    title.parentElement,
+    title.parentElement?.parentElement,
+    ...(Array.from(title.parentElement?.parentElement?.children || []).slice(0, 6))
+  ].filter(Boolean);
+
+  for (const node of candidates) {
+    if (node.matches?.(".video-data, .video-info-detail, .video-info-meta")) {
+      return node;
+    }
+    if (node.querySelector?.(".view-text")) {
+      return node;
+    }
+  }
+
+  return null;
+}
+
+function findReaderContentHost(playerHost = state.readingPlayerHost, titleNode = findReaderTitleContainer()) {
+  if (!playerHost && !titleNode) {
+    return null;
+  }
+
+  let current = titleNode || playerHost;
+  while (current && current !== document.body) {
+    const containsPlayer = playerHost ? current.contains(playerHost) : true;
+    const containsTitle = titleNode ? current.contains(titleNode) : true;
+    if (containsPlayer && containsTitle) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return playerHost?.parentElement || titleNode?.parentElement || null;
+}
+
+function moveRootToReaderContentHost() {
+  return;
+}
+
+function restoreRootMount() {
+  return;
+}
+
+function dismissReaderMiniPlayer(playerHost = state.readingPlayerHost) {
+  const explicitClose = Array.from(document.querySelectorAll(".bpx-player-mini-close")).find(isVisibleReaderControl);
+  if (explicitClose) {
+    explicitClose.click();
+    return true;
+  }
+
+  if (!playerHost) {
+    return false;
+  }
+
+  const computed = window.getComputedStyle(playerHost);
+  const fixedLike = computed.position === "fixed" || /mini|picture|float|fixed-player/i.test(playerHost.className || "");
+  if (!fixedLike) {
+    return false;
+  }
+
+  const roots = Array.from(
+    new Set([
+      playerHost,
+      playerHost.parentElement,
+      playerHost.closest("#playerWrap"),
+      playerHost.closest("#bilibili-player")
+    ].filter(Boolean))
+  );
+
+  const selectors = [
+    ".bpx-player-mini-close",
+    "[class*='mini'][class*='close']",
+    "[class*='close']",
+    "button[aria-label*='关闭']",
+    "button[title*='关闭']",
+    "[role='button'][aria-label*='关闭']",
+    "[role='button'][title*='关闭']"
+  ];
+
+  for (const root of roots) {
+    for (const selector of selectors) {
+      const candidates = Array.from(root.querySelectorAll(selector)).filter(isVisibleReaderControl);
+      const button = candidates.sort((a, b) => {
+        const rectA = a.getBoundingClientRect();
+        const rectB = b.getBoundingClientRect();
+        return rectA.width * rectA.height - rectB.width * rectB.height;
+      })[0];
+      if (button) {
+        button.click();
+        return true;
+      }
+    }
+  }
+
+  const playerRect = playerHost.getBoundingClientRect();
+  for (const root of roots) {
+    const fallback = Array.from(root.querySelectorAll("button, [role='button'], [tabindex], div, span"))
+      .filter((node) => {
+        if (!isVisibleReaderControl(node)) {
+          return false;
+        }
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        const nearTopRight =
+          rect.width <= 48 &&
+          rect.height <= 48 &&
+          rect.left >= playerRect.right - 96 &&
+          rect.top <= playerRect.top + 96;
+        return nearTopRight && (style.cursor === "pointer" || node.hasAttribute("role") || node.hasAttribute("tabindex"));
+      })
+      .sort((a, b) => {
+        const rectA = a.getBoundingClientRect();
+        const rectB = b.getBoundingClientRect();
+        return rectA.top + (playerRect.right - rectA.right) - (rectB.top + (playerRect.right - rectB.right));
+      })[0];
+
+    if (fallback) {
+      fallback.click();
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function scheduleReaderMiniPlayerDismiss(maxAttempts = 12, delayMs = 180) {
+  if (!state.readingViewOpen) {
+    return;
+  }
+  if (state.readingMiniDismissTimer) {
+    window.clearTimeout(state.readingMiniDismissTimer);
+    state.readingMiniDismissTimer = 0;
+  }
+
+  let attempts = 0;
+  const run = () => {
+    if (!state.readingViewOpen) {
+      state.readingMiniDismissTimer = 0;
+      return;
+    }
+
+    const closed = dismissReaderMiniPlayer();
+    const host = findReaderPlayerHost(getRuntimeVideoElement());
+    if (host) {
+      state.readingPlayerHost = host;
+      normalizeReaderPlayerContainer(host);
+      layoutReaderPlayerHost();
+    }
+
+    attempts += 1;
+    const miniExists = Boolean(document.querySelector(".bpx-player-mini-close, .bpx-player-mini-warp"));
+    const hostFixed = Boolean(host && window.getComputedStyle(host).position === "fixed");
+    if (attempts < maxAttempts && (miniExists || hostFixed || closed)) {
+      state.readingMiniDismissTimer = window.setTimeout(run, delayMs);
+      return;
+    }
+    state.readingMiniDismissTimer = 0;
+  };
+
+  state.readingMiniDismissTimer = window.setTimeout(run, 40);
+}
+
+function getReaderControlsRoot(playerHost = state.readingPlayerHost) {
+  return (
+    playerHost?.closest?.("#playerWrap") ||
+    playerHost?.closest?.("#bilibili-player") ||
+    playerHost ||
+    document.getElementById("playerWrap") ||
+    document.getElementById("bilibili-player")
+  );
+}
+
+function setReaderPlayerControlsVisible(visible, playerHost = state.readingPlayerHost) {
+  if (!state.readingNativePageMode || !isWatchlaterPage() || !playerHost) {
+    return;
+  }
+
+  const controlRoot = getReaderControlsRoot(playerHost);
+  if (!controlRoot) {
+    return;
+  }
+
+  const displayMap = new Map([
+    [".bpx-player-control-wrap", "block"],
+    [".bpx-player-control-mask", "block"],
+    [".bpx-player-control-entity", "block"]
+  ]);
+
+  displayMap.forEach((displayValue, selector) => {
+    const node = controlRoot.querySelector(selector);
+    if (!node) {
+      return;
+    }
+
+    if (visible) {
+      node.style.setProperty("display", displayValue, "important");
+      node.setAttribute("data-boc-reader-controls-forced", "1");
+      return;
+    }
+
+    if (node.getAttribute("data-boc-reader-controls-forced") === "1") {
+      node.style.removeProperty("display");
+      node.removeAttribute("data-boc-reader-controls-forced");
+    }
+  });
+
+  if (visible) {
+    if (playerHost.classList.contains("bpx-state-no-cursor")) {
+      playerHost.classList.remove("bpx-state-no-cursor");
+      playerHost.setAttribute("data-boc-reader-no-cursor-cleared", "1");
+    }
+    return;
+  }
+
+  if (playerHost.getAttribute("data-boc-reader-no-cursor-cleared") === "1") {
+    playerHost.classList.add("bpx-state-no-cursor");
+    playerHost.removeAttribute("data-boc-reader-no-cursor-cleared");
+  }
+}
+
+function scheduleReaderPlayerControlsHide(playerHost = state.readingControlsHoverHost || state.readingPlayerHost) {
+  if (state.readingControlsHideTimer) {
+    window.clearTimeout(state.readingControlsHideTimer);
+  }
+  state.readingControlsHideTimer = window.setTimeout(() => {
+    state.readingControlsHideTimer = 0;
+    if (!state.readingViewOpen) {
+      return;
+    }
+    setReaderPlayerControlsVisible(false, playerHost);
+  }, 1200);
+}
+
+function bindReaderPlayerControlsHover(playerHost = state.readingPlayerHost) {
+  if (!state.readingNativePageMode || !isWatchlaterPage() || !playerHost) {
+    return;
+  }
+
+  if (state.readingControlsHoverHost && state.readingControlsHoverHost !== playerHost) {
+    unbindReaderPlayerControlsHover();
+  }
+  if (playerHost.__bocReaderControlsHoverBound) {
+    state.readingControlsHoverHost = playerHost;
+    return;
+  }
+
+  const showControls = () => {
+    if (!state.readingViewOpen) {
+      return;
+    }
+    setReaderPlayerControlsVisible(true, playerHost);
+    scheduleReaderPlayerControlsHide(playerHost);
+  };
+  const hideControls = () => {
+    if (state.readingControlsHideTimer) {
+      window.clearTimeout(state.readingControlsHideTimer);
+      state.readingControlsHideTimer = 0;
+    }
+    setReaderPlayerControlsVisible(false, playerHost);
+  };
+
+  playerHost.addEventListener("mouseenter", showControls, true);
+  playerHost.addEventListener("mousemove", showControls, true);
+  playerHost.addEventListener("mouseleave", hideControls, true);
+  playerHost.__bocReaderControlsHoverBound = { showControls, hideControls };
+  state.readingControlsHoverHost = playerHost;
+}
+
+function unbindReaderPlayerControlsHover() {
+  const playerHost = state.readingControlsHoverHost;
+  if (state.readingControlsHideTimer) {
+    window.clearTimeout(state.readingControlsHideTimer);
+    state.readingControlsHideTimer = 0;
+  }
+  if (!playerHost?.__bocReaderControlsHoverBound) {
+    state.readingControlsHoverHost = null;
+    return;
+  }
+
+  const { showControls, hideControls } = playerHost.__bocReaderControlsHoverBound;
+  playerHost.removeEventListener("mouseenter", showControls, true);
+  playerHost.removeEventListener("mousemove", showControls, true);
+  playerHost.removeEventListener("mouseleave", hideControls, true);
+  delete playerHost.__bocReaderControlsHoverBound;
+  setReaderPlayerControlsVisible(false, playerHost);
+  state.readingControlsHoverHost = null;
+}
+
+function isVisibleReaderControl(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") {
+    return false;
+  }
+  const rect = node.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+  const style = window.getComputedStyle(node);
+  return style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+}
+
+function normalizeReaderPlayerContainer(playerHost = state.readingPlayerHost) {
+  if (!playerHost) {
+    return;
+  }
+
+  restoreReaderPlayerContainer();
+  const adjusted = [];
+  let current = playerHost;
+  let depth = 0;
+
+  while (current && current !== document.body && depth < 12) {
+    const computed = window.getComputedStyle(current);
+    const className = typeof current.className === "string" ? current.className : "";
+    const isPlayerLayoutNode = current.matches?.(
+      ".bpx-player-container, .bpx-player-video-area, .bpx-player-primary-area, .bpx-player-inner, .scroll-sticky, .player-wrap, #playerWrap, #bilibili-player"
+    );
+    const isExplicitMiniNode = current.matches?.(
+      ".bpx-player-mini-warp, .bpx-player-mini-close, [class*='mini-player'], [class*='picture-in-picture']"
+    );
+    const hasFloatingPosition = computed.position === "fixed" || computed.position === "sticky";
+    const isMiniLike =
+      hasFloatingPosition ||
+      /mini|picture|float|fixed-player/i.test(className) ||
+      current.matches?.(".bpx-player-mini-warp, .bpx-player-mini-close");
+    const shouldReset = state.readingNativePageMode
+      ? Boolean(isExplicitMiniNode || (isPlayerLayoutNode && isMiniLike))
+      : isPlayerLayoutNode || isMiniLike;
+
+    if (shouldReset) {
+      adjusted.push({
+        node: current,
+        position: current.style.position,
+        left: current.style.left,
+        top: current.style.top,
+        right: current.style.right,
+        bottom: current.style.bottom,
+        width: current.style.width,
+        height: current.style.height,
+        transform: current.style.transform,
+        margin: current.style.margin,
+        zIndex: current.style.zIndex
+      });
+      current.setAttribute("data-boc-reader-player-reset", "1");
+      current.style.setProperty("position", "static", "important");
+      current.style.setProperty("left", "auto", "important");
+      current.style.setProperty("top", "auto", "important");
+      current.style.setProperty("right", "auto", "important");
+      current.style.setProperty("bottom", "auto", "important");
+      current.style.setProperty("transform", "none", "important");
+      current.style.setProperty("margin", "0", "important");
+      current.style.setProperty("z-index", "auto", "important");
+      if (current !== playerHost) {
+        current.style.removeProperty("width");
+        current.style.removeProperty("height");
+      }
+    }
+
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  state.readingPlayerAdjustedNodes = adjusted;
+}
+
+function restoreReaderPlayerContainer() {
+  const adjusted = Array.isArray(state.readingPlayerAdjustedNodes) ? state.readingPlayerAdjustedNodes : [];
+  adjusted.forEach((item) => {
+    const node = item?.node;
+    if (!node?.isConnected) {
+      return;
+    }
+    node.style.position = item.position || "";
+    node.style.left = item.left || "";
+    node.style.top = item.top || "";
+    node.style.right = item.right || "";
+    node.style.bottom = item.bottom || "";
+    node.style.width = item.width || "";
+    node.style.height = item.height || "";
+    node.style.transform = item.transform || "";
+    node.style.margin = item.margin || "";
+    node.style.zIndex = item.zIndex || "";
+    node.removeAttribute("data-boc-reader-player-reset");
+  });
+  state.readingPlayerAdjustedNodes = [];
+}
+
+function alignReaderViewportToPlayer() {
+  if (!isReaderMode()) {
+    return;
+  }
+
+  const titleNode = findReaderTitleContainer();
+  const playerHost = state.readingPlayerHost || findReaderPlayerHost(getRuntimeVideoElement());
+  const anchor = titleNode || playerHost;
+  if (!anchor) {
+    return;
+  }
+
+  const titleRect = titleNode?.getBoundingClientRect?.();
+  const playerRect = playerHost?.getBoundingClientRect?.();
+  const top = Math.min(
+    titleRect?.top ?? Number.POSITIVE_INFINITY,
+    playerRect?.top ?? Number.POSITIVE_INFINITY
+  );
+  if (!Number.isFinite(top)) {
+    return;
+  }
+
+  const nextTop = Math.max(0, window.scrollY + top - 16);
+  window.scrollTo({ top: nextTop, behavior: "auto" });
+  window.setTimeout(() => {
+    if (!state.readingViewOpen || !isReaderMode()) {
+      return;
+    }
+    window.scrollTo({ top: nextTop, behavior: "auto" });
+    layoutReaderPlayerHost();
+  }, 120);
+}
+
+function syncReadingViewPlayback(forceScroll = false) {
+  if (!state.readingViewOpen) {
+    return;
+  }
+
+  if (state.readingNativePageMode) {
+    layoutReaderPlayerHost();
+  }
+
+  const runtimeVideo = getRuntimeVideoElement();
+  const runtimeHost = findReaderPlayerHost(runtimeVideo);
+  if (runtimeVideo && runtimeHost) {
+    const playerChanged =
+      runtimeVideo !== state.readingVideoEl || runtimeHost !== state.readingPlayerHost;
+    if (playerChanged) {
+      queueEnsureReaderPlayerMounted();
+    }
+  }
+
+  const video = bindReadingViewVideo(runtimeVideo || state.readingVideoEl);
+  if (!video) {
+    renderReadingStatus("当前页面没有找到可联动的视频播放器。");
+    return;
+  }
+
+  const currentTime = Number(video.currentTime || 0) || 0;
+  const subtitleIndex = findActiveSubtitleIndex(currentTime);
+  const chapterIndex = findActiveChapterIndex(currentTime);
+  const changed =
+    subtitleIndex !== state.readingActiveSubtitleIndex ||
+    chapterIndex !== state.readingActiveChapterIndex;
+
+  setActiveReadingItems(subtitleIndex, chapterIndex, forceScroll || changed);
+  updateReaderFollowState();
+  renderReadingStatus(`当前进度 ${formatCompactTimestamp(currentTime, currentTime >= 3600)}`);
+}
+
+function findActiveSubtitleIndex(currentTime) {
+  const items = Array.isArray(state.subtitleBody) ? state.subtitleBody : [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const from = Number(item?.from || 0) || 0;
+    const rawTo = Number(item?.to || 0) || 0;
+    const to = rawTo > from ? rawTo : from + 2;
+    if (currentTime >= from && currentTime < to) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findActiveChapterIndex(currentTime) {
+  const chapters = normalizeChapters(state.chapters || []);
+  for (let index = 0; index < chapters.length; index += 1) {
+    const item = chapters[index];
+    const from = Number(item?.from || 0) || 0;
+    const next = chapters[index + 1];
+    const explicitTo = Number(item?.to || 0) || 0;
+    const fallbackTo = next && Number(next.from) > from ? Number(next.from) : explicitTo;
+    const to = fallbackTo > from ? fallbackTo : Number.POSITIVE_INFINITY;
+    if (currentTime >= from && currentTime < to) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function setActiveReadingItems(subtitleIndex, chapterIndex, shouldScroll = false) {
+  const transcriptList = byId(ids.readingTranscriptList);
+  const chapterList = byId(ids.readingChapterList);
+  const nextTranscript = transcriptList.querySelector(`[data-index="${subtitleIndex}"]`);
+  const nextChapter = chapterList.querySelector(`[data-index="${chapterIndex}"]`);
+  const currentTranscript = transcriptList.querySelector(".boc-reading-item.is-active");
+  const currentChapter = chapterList.querySelector(".boc-reading-chapter.is-active");
+
+  if (currentTranscript && currentTranscript !== nextTranscript) {
+    currentTranscript.classList.remove("is-active");
+  }
+  if (currentChapter && currentChapter !== nextChapter) {
+    currentChapter.classList.remove("is-active");
+  }
+  if (nextTranscript) {
+    nextTranscript.classList.add("is-active");
+  }
+  if (nextChapter) {
+    nextChapter.classList.add("is-active");
+  }
+
+  if (shouldScroll && state.readingAutoScroll) {
+    if (Date.now() < state.readingManualScrollPauseUntil) {
+      updateReaderFollowState();
+      state.readingActiveSubtitleIndex = subtitleIndex;
+      state.readingActiveChapterIndex = chapterIndex;
+      return;
+    }
+    if (nextTranscript) {
+      scrollReadingTranscriptItemIntoView(nextTranscript);
+    }
+    if (nextChapter) {
+      scrollReadingRailItemIntoView(nextChapter);
+    }
+  }
+
+  state.readingActiveSubtitleIndex = subtitleIndex;
+  state.readingActiveChapterIndex = chapterIndex;
+}
+
+function scrollReadingRailItemIntoView(node) {
+  if (!node) {
+    return;
+  }
+  state.readingProgrammaticScrollUntil = Date.now() + 600;
+  node.scrollIntoView({
+    behavior: "smooth",
+    block: "nearest",
+    inline: "nearest"
+  });
+}
+
+function scrollReadingTranscriptItemIntoView(node) {
+  if (!node) {
+    return;
+  }
+
+  const transcriptList = byId(ids.readingTranscriptList);
+  const inlineHost = document.getElementById("boc-reading-inline-host");
+  const listRect = transcriptList.getBoundingClientRect();
+  const itemRect = node.getBoundingClientRect();
+  if (!(listRect.height > 0) || !(itemRect.height > 0)) {
+    scrollReadingRailItemIntoView(node);
+    return;
+  }
+
+  const behavior = state.readingNextScrollBehavior === "auto" ? "auto" : "smooth";
+  state.readingProgrammaticScrollUntil = Date.now() + (behavior === "auto" ? 120 : 800);
+  state.readingNextScrollBehavior = "smooth";
+  if (state.readingNativePageMode && inlineHost && inlineHost.scrollHeight > inlineHost.clientHeight + 8) {
+    const hostRect = inlineHost.getBoundingClientRect();
+    const computed = window.getComputedStyle(node);
+    const lineHeight = Number.parseFloat(computed.lineHeight) || itemRect.height || 32;
+    const desiredOffset = lineHeight * 2.5;
+    const targetScrollTop =
+      inlineHost.scrollTop + (itemRect.top - hostRect.top) - desiredOffset;
+    inlineHost.scrollTo({
+      top: Math.max(0, Math.round(targetScrollTop)),
+      behavior
+    });
+    return;
+  }
+  if (state.readingNativePageMode || transcriptList.scrollHeight <= transcriptList.clientHeight + 8) {
+    const desiredTop = listRect.top + Math.max(72, Math.min(listRect.height * 0.24, 220));
+    const nextTop = window.scrollY + itemRect.top - desiredTop;
+    window.scrollTo({
+      top: Math.max(0, Math.round(nextTop)),
+      behavior
+    });
+    return;
+  }
+
+  const targetScrollTop =
+    transcriptList.scrollTop + (itemRect.top - listRect.top) - Math.max(48, Math.min(listRect.height * 0.24, 180));
+  transcriptList.scrollTo({
+    top: Math.max(0, Math.round(targetScrollTop)),
+    behavior
+  });
+}
+
+function jumpReadingTarget(seconds) {
+  const video = bindReadingViewVideo();
+  if (!video) {
+    renderReadingStatus("当前页面没有找到可联动的视频播放器。");
+    return;
+  }
+
+  const nextTime = Math.max(0, Number(seconds || 0) || 0);
+  state.readingManualScrollPauseUntil = 0;
+  state.readingNextScrollBehavior = "auto";
+  updateReaderFollowState();
+  video.currentTime = nextTime;
+  if (video.paused) {
+    video.play().catch(() => {});
+  }
+  syncReadingViewPlayback(true);
+}
+
+function onReadingChapterClick(event) {
+  const target = event.target.closest(".boc-reading-chapter");
+  if (!target) {
+    return;
+  }
+  jumpReadingTarget(target.dataset.seconds);
+}
+
+function onReadingTranscriptClick(event) {
+  const target = event.target.closest(".boc-reading-item");
+  if (!target) {
+    return;
+  }
+  // Don't jump if user is selecting text
+  if (window.getSelection()?.toString().trim()) {
+    return;
+  }
+  jumpReadingTarget(target.dataset.seconds);
+}
+
+function noteManualReaderInteraction(durationMs = 7000) {
+  if (!state.readingAutoScroll) {
+    updateReaderFollowState();
+    return;
+  }
+  state.readingManualScrollPauseUntil = Date.now() + durationMs;
+  updateReaderFollowState();
+}
+
+function updateReaderFollowState() {
+  const readingView = document.getElementById(ids.readingView);
+  if (!readingView) {
+    return;
+  }
+  const mode =
+    !state.readingAutoScroll ? "off" : Date.now() < state.readingManualScrollPauseUntil ? "manual" : "auto";
+  readingView.setAttribute("data-boc-reader-follow", mode);
+}
+
+function computeCurrentClipSignature(url = location.href) {
+  const bvid = extractBvid(url);
+  const page = extractPageIndex(url);
+  const title = readVideoTitle();
+  return [bvid, page, title].map((item) => String(item || "").trim()).join("|");
 }
 
 function toReadableText(value, fallback = "") {
@@ -1525,7 +3800,7 @@ function validateSubtitleByDuration(body, videoDuration) {
 }
 
 function readRuntimeVideoDuration() {
-  const video = document.querySelector("video");
+  const video = getRuntimeVideoElement();
   const duration = Number(video?.duration);
   if (Number.isFinite(duration) && duration > 0) {
     return duration;
