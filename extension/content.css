@@ -456,7 +456,7 @@
 
 .boc-reading-chapter-time,
 .boc-reading-time {
-  font-size: 13px;
+  font-size: var(--boc-reader-transcript-font-size);
   font-weight: 600;
   color: #16a34a;
   padding-top: 2px;
