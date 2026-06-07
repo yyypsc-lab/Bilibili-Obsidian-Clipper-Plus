@@ -561,7 +561,7 @@ function buildUiHtml() {
                 </label>
                 <label class="boc-reading-toggle boc-reading-toggle-inline">
                   <input id="${ids.readingTranscriptVisible}" type="checkbox" checked />
-                  <span>字幕区域</span>
+                  <span>字幕</span>
                 </label>
               </div>
             </section>
@@ -1830,6 +1830,24 @@ function applyReadingViewPresentation() {
   if (main) {
     main.style.display = state.readingTranscriptVisible ? "" : "none";
   }
+  const inlineHost = document.getElementById("boc-reading-inline-host");
+  if (inlineHost) {
+    const leftContainer = document.querySelector(".left-container");
+    const bgColor = leftContainer ? getComputedStyle(leftContainer).backgroundColor : "";
+    if (state.readingTranscriptVisible) {
+      inlineHost.style.border = "";
+      inlineHost.style.background = "";
+      inlineHost.style.marginTop = "";
+      inlineHost.style.boxShadow = "";
+      inlineHost.style.borderRadius = "";
+    } else {
+      inlineHost.style.border = "none";
+      inlineHost.style.background = bgColor;
+      inlineHost.style.marginTop = "0";
+      inlineHost.style.boxShadow = "none";
+      inlineHost.style.borderRadius = "0";
+    }
+  }
 }
 
 function updateReaderChapterPresence(hasChapters) {
@@ -2679,6 +2697,21 @@ function moveReadingMainInline() {
 
   if (readingMain.parentElement !== inlineHost) {
     inlineHost.appendChild(readingMain);
+  }
+  const leftContainer = document.querySelector(".left-container");
+  const bgColor = leftContainer ? getComputedStyle(leftContainer).backgroundColor : "";
+  if (state.readingTranscriptVisible) {
+    inlineHost.style.border = "";
+    inlineHost.style.background = "";
+    inlineHost.style.marginTop = "";
+    inlineHost.style.boxShadow = "";
+    inlineHost.style.borderRadius = "";
+  } else {
+    inlineHost.style.border = "none";
+    inlineHost.style.background = bgColor;
+    inlineHost.style.marginTop = "0";
+    inlineHost.style.boxShadow = "none";
+    inlineHost.style.borderRadius = "0";
   }
   updateReadingTranscriptTailSpacer();
 }
