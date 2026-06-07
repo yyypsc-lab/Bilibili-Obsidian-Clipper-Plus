@@ -860,7 +860,7 @@ body[data-boc-reader-mode="1"] #app {
 #boc-reading-view .boc-reading-status,
 #boc-reading-view .boc-reading-panel-grid label,
 #boc-reading-view .boc-reading-info-label {
-  font-size: var(--boc-reader-transcript-font-size);
+  font-size: 14px;
   color: var(--boc-reader-muted);
 }
 
