@@ -3683,8 +3683,7 @@ function updateReaderFollowState() {
 function computeCurrentClipSignature(url = location.href) {
   const bvid = extractBvid(url);
   const page = extractPageIndex(url);
-  const title = readVideoTitle();
-  return [bvid, page, title].map((item) => String(item || "").trim()).join("|");
+  return [bvid, page].map((item) => String(item || "").trim()).join("|");
 }
 
 function toReadableText(value, fallback = "") {
