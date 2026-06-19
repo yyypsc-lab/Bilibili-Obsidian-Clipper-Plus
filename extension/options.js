@@ -696,7 +696,6 @@ function addAiProviderRow(item = {}) {
   const baseUrl = String(item.baseUrl ?? preset.baseUrl ?? "");
   const model = String(item.model || "");
   const requiresKey = item.requiresKey !== false && preset.requiresKey !== false;
-  const enabled = item.enabled !== false;
   const hasSavedKey = Boolean(item.hasSavedKey);
 
   const row = document.createElement("div");
@@ -710,11 +709,7 @@ function addAiProviderRow(item = {}) {
     </select>
     <input class="ai-provider-baseurl" type="text" placeholder="baseUrl（如 https://api.openai.com/v1）" value="${escapeAttribute(baseUrl)}" />
     <input class="ai-provider-model" type="text" placeholder="模型名（如 gpt-4o-mini）" value="${escapeAttribute(model)}" />
-    <input class="ai-provider-apikey" type="password" placeholder="${hasSavedKey ? "API Key（已保存，留空不修改）" : (requiresKey ? "API Key" : "API Key（可选）")}" autocomplete="off" />
-    <label class="ai-provider-toggle" title="启用">
-      <input class="ai-provider-enabled" type="checkbox" ${enabled ? "checked" : ""} />
-      <span>启用</span>
-    </label>
+    <input class="ai-provider-apikey" type="password" placeholder="${hasSavedKey ? "已保存" : (requiresKey ? "API Key" : "API Key（可选）")}" autocomplete="off" />
     <button type="button" class="secondary-btn ai-provider-test">测试</button>
     <button type="button" class="ai-provider-remove" aria-label="删除" title="删除">
       <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
@@ -739,7 +734,7 @@ function addAiProviderRow(item = {}) {
     }
     const apikeyInput = row.querySelector(".ai-provider-apikey");
     apikeyInput.placeholder = row.dataset.hasSavedKey === "1"
-      ? "API Key（已保存，留空不修改）"
+      ? "已保存"
       : (next.requiresKey ? "API Key" : "API Key（可选）");
     row.dataset.currentPresetId = next.id;
   });
@@ -801,7 +796,6 @@ function collectAiProviders() {
   return Array.from(elements.aiProvidersList.querySelectorAll(".ai-provider-row")).map((row) => {
     const presetSelect = row.querySelector(".ai-provider-preset");
     const preset = AI_PRESETS.find((p) => p.id === presetSelect.value) || AI_PRESETS[AI_PRESETS.length - 1];
-    const enabled = Boolean(row.querySelector(".ai-provider-enabled")?.checked);
     const apiKey = row.querySelector(".ai-provider-apikey").value.trim();
     const baseUrl = row.querySelector(".ai-provider-baseurl").value.trim().replace(/\/+$/, "");
     return {
@@ -812,7 +806,7 @@ function collectAiProviders() {
       model: row.querySelector(".ai-provider-model").value.trim(),
       temperature: 0.7,
       requiresKey: preset.requiresKey,
-      enabled,
+      enabled: true,
       apiKey,
       hasSavedKey: row.dataset.hasSavedKey === "1"
     };
@@ -822,9 +816,6 @@ function collectAiProviders() {
 function validateAiProviders(items) {
   const seenIds = new Set();
   for (const item of items) {
-    if (!item.enabled && !item.baseUrl && !item.model && !item.apiKey && !item.hasSavedKey) {
-      continue;
-    }
     if (!item.baseUrl) {
       return { ok: false, message: "每个平台都需要填写 baseUrl" };
     }
@@ -836,10 +827,10 @@ function validateAiProviders(items) {
     } catch {
       return { ok: false, message: `baseUrl 格式不正确：${item.baseUrl}` };
     }
-    if (item.enabled && item.requiresKey && !item.apiKey && !item.hasSavedKey) {
+    if (item.requiresKey && !item.apiKey && !item.hasSavedKey) {
       return { ok: false, message: `平台「${item.name}」需要填写 API Key` };
     }
-    if (item.enabled && !item.model) {
+    if (!item.model) {
       return { ok: false, message: `平台「${item.name}」需要填写模型名` };
     }
     if (seenIds.has(item.id)) {

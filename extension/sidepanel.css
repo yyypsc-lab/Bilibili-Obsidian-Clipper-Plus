@@ -22,7 +22,7 @@ body {
 .sp-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-height: 46px;
   padding: 10px 12px 8px;
   border-bottom: 1px solid #eef2f7;
@@ -60,17 +60,21 @@ body {
 }
 
 .sp-icon-btn {
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: #6b7280;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 21px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.sp-icon-btn + .sp-icon-btn {
+  margin-left: -3px;
 }
 
 .sp-icon-btn:hover {
@@ -138,6 +142,52 @@ body {
   border: 0;
   padding: 0;
   white-space: normal;
+}
+
+.sp-msg-assistant-body {
+  min-width: 0;
+}
+
+.sp-msg-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+
+.sp-msg-copy-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #e7ebf0;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #6b7280;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sp-msg-copy-btn:hover {
+  background: #f7f8fb;
+  color: #111827;
+  border-color: #d8dee6;
+}
+
+.sp-msg-copy-btn:disabled {
+  cursor: default;
+  color: #4b5563;
+}
+
+.sp-msg-copy-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .sp-msg-assistant p {

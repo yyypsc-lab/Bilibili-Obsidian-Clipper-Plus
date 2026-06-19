@@ -99,10 +99,10 @@ select {
 
 textarea.settings-textarea {
   width: 100%;
-  min-height: 104px;
+  min-height: 78px;
   border: 1px solid #d1d5db;
   border-radius: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 0;
   padding: 10px;
   background: #fff;
   font: inherit;
@@ -113,6 +113,10 @@ textarea.settings-textarea {
 
 textarea.settings-textarea.settings-textarea-compact {
   min-height: 84px;
+}
+
+.field-group-tight-bottom {
+  padding-bottom: 8px;
 }
 
 input.input-error,
@@ -511,7 +515,8 @@ ol {
 
 .ai-provider-row {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto auto auto;
+  width: 100%;
+  grid-template-columns: 102px minmax(0, 1.58fr) minmax(0, 0.96fr) minmax(0, 0.63fr) 56px 30px;
   gap: 6px;
   align-items: center;
   padding: 0;
@@ -536,30 +541,14 @@ ol {
   align-self: center;
 }
 
-.ai-provider-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 6px;
-  font-size: 12px;
-  color: #4b5563;
-  white-space: nowrap;
-  border-radius: 6px;
-  cursor: pointer;
-  margin: 0;
-}
-
-.ai-provider-toggle input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  margin: 0;
+.ai-provider-row > * {
+  min-width: 0;
 }
 
 .ai-provider-row .ai-provider-test {
   height: 30px;
-  padding: 0 12px;
+  width: 56px;
+  padding: 0;
   font-size: 12px;
   line-height: 1;
 }

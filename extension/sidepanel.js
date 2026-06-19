@@ -137,7 +137,7 @@ async function loadContextState({ forceRefresh = false, silent = false } = {}) {
     currentContextKey = "";
     updateContextChip();
     if (!silent) {
-      resetConversationView(resp?.error || "请先打开一个 B 站视频页。");
+      resetConversationView(resp?.error || "当前页面上下文读取失败。");
     }
     return false;
   }
@@ -176,7 +176,7 @@ function updateContextChip() {
     return;
   }
 
-  const shortTitle = contextData.title ? truncate(contextData.title, 8) : "未知视频";
+  const shortTitle = contextData.title ? truncate(contextData.title, 11) : "未知视频";
   els.contextChip.textContent = shortTitle;
   els.contextChip.title = contextData.title || "";
 }
@@ -371,7 +371,7 @@ async function ensureCurrentContextForSend() {
   const previousKey = currentContextKey;
   const ok = await loadContextState({ forceRefresh: false, silent: true });
   if (!ok || !contextData) {
-    resetConversationView("请先打开一个 B 站视频页。");
+    resetConversationView("当前页面上下文读取失败。");
     return false;
   }
   if (previousKey && currentContextKey && previousKey !== currentContextKey) {
@@ -480,7 +480,7 @@ function finalizeAssistant(node) {
     return;
   }
   const raw = node.dataset.raw || "";
-  node.innerHTML = renderMarkdown(raw);
+  renderAssistantMessage(node, raw);
   if (activeUserPrompt && raw) {
     chatHistory.push({ role: "user", content: activeUserPrompt });
     chatHistory.push({ role: "assistant", content: raw });
@@ -516,6 +516,49 @@ function showAssistantError(node, error) {
   els.input.disabled = false;
   els.input.focus();
   scrollToBottom();
+}
+
+function renderAssistantMessage(node, raw) {
+  if (!node) {
+    return;
+  }
+  node.innerHTML = "";
+  const cleanedRaw = stripThinkBlocks(raw);
+
+  const content = document.createElement("div");
+  content.className = "sp-msg-assistant-body";
+  content.innerHTML = renderMarkdown(cleanedRaw);
+  node.appendChild(content);
+
+  const actions = document.createElement("div");
+  actions.className = "sp-msg-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "sp-msg-copy-btn";
+  copyBtn.setAttribute("aria-label", "复制回复");
+  copyBtn.setAttribute("title", "复制回复");
+  copyBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+      <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+      <path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  `;
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(cleanedRaw);
+      copyBtn.disabled = true;
+      window.setTimeout(() => {
+        copyBtn.disabled = false;
+      }, 500);
+    } catch {
+      copyBtn.disabled = true;
+      window.setTimeout(() => {
+        copyBtn.disabled = false;
+      }, 500);
+    }
+  });
+  actions.appendChild(copyBtn);
+  node.appendChild(actions);
 }
 
 function restartChat({ keepContext = false } = {}) {
@@ -705,6 +748,8 @@ function renderInline(text) {
 function stripThinkBlocks(text) {
   return String(text || "")
     .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/<\/think>/gi, "")
     .replace(/^\s*<\/?think\b[^>]*>\s*$/gim, "")
     .trim();
 }

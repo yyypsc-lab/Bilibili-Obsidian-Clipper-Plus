@@ -181,8 +181,21 @@ async function getAiSidepanelState(tabId, { forceRefresh = false } = {}) {
   }
 
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab?.id || !isSupportedAiTabUrl(tab.url)) {
-    throw new Error("请先打开一个 B 站视频页。");
+  if (!tab?.id) {
+    throw new Error("找不到当前标签页。");
+  }
+
+  if (!isSupportedAiTabUrl(tab.url)) {
+    return {
+      title: String(tab.title || "").trim(),
+      url: String(tab.url || "").trim(),
+      author: "",
+      uploadDate: "",
+      subtitleMarkdown: "",
+      subtitleBody: [],
+      hotComments: [],
+      isVideoContext: false
+    };
   }
 
   await ensureReaderContentReady(tab.id);
@@ -223,7 +236,8 @@ async function getAiSidepanelState(tabId, { forceRefresh = false } = {}) {
 
   return {
     ...contextResp.payload,
-    hotComments
+    hotComments,
+    isVideoContext: true
   };
 }
 
@@ -791,16 +805,24 @@ async function saveAiProviderKey(providerId, apiKey) {
 
 function buildAiMessages({ context, userPrompt, history, systemPrompt }) {
   const ctx = context || {};
-  const sections = [
-    `你是一个 B 站视频助手。当前用户正在看一个视频，标题：「${ctx.title || "未知"}」`,
-    `作者：${ctx.author || "未知"} | 上传日期：${ctx.uploadDate || "未知"}`
-  ];
+  const hasVideoContext = Boolean(ctx.isVideoContext);
+  const sections = hasVideoContext
+    ? [
+        `你是一个 B 站视频助手。当前用户正在看一个视频，标题：「${ctx.title || "未知"}」`,
+        `作者：${ctx.author || "未知"} | 上传日期：${ctx.uploadDate || "未知"}`
+      ]
+    : [
+        "你是一个通用网页助手。",
+        `当前页面标题：「${ctx.title || "未知"}」`,
+        `当前页面链接：${ctx.url || "未知"}`
+      ];
+
   if (ctx.subtitleMarkdown) {
     sections.push(`以下是视频的字幕全文：\n\n${ctx.subtitleMarkdown}`);
-  } else {
+  } else if (hasVideoContext) {
     sections.push("（暂无字幕）");
   }
-  if (Array.isArray(ctx.hotComments) && ctx.hotComments.length) {
+  if (hasVideoContext && Array.isArray(ctx.hotComments) && ctx.hotComments.length) {
     const block = ctx.hotComments
       .map((c, i) => `${i + 1}. ${c.uname || "匿名"}（赞 ${c.like || 0}）: ${c.message || ""}`)
       .join("\n");
@@ -817,10 +839,8 @@ function buildAiMessages({ context, userPrompt, history, systemPrompt }) {
   ];
 }
 
-function clipAiSubtitle(markdown, maxChars = 8000) {
-  const text = String(markdown || "");
-  if (!text || text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + "\n\n...（字幕过长，已截断）";
+function clipAiSubtitle(markdown) {
+  return String(markdown || "");
 }
 
 async function* parseOpenAISSE(response) {
