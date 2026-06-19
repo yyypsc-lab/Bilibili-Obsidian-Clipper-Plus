@@ -678,7 +678,7 @@ function normalizeAiPresetPrompts(value) {
 
 function normalizeFixedPropertyType(value) {
   const type = toString(value).trim().toLowerCase();
-  return type === "number" || type === "checkbox" || type === "list" ? type : "text";
+  return type === "number" || type === "checkbox" || type === "list" || type === "date" ? type : "text";
 }
 
 function normalizeFixedPropertyValue(type, value) {

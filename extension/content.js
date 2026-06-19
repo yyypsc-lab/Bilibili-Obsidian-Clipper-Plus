@@ -4654,6 +4654,7 @@ function buildMarkdown(meta, body, settings) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+  const tagsCsv = tags.join(", ");
   const tagsYaml =
     tags.length === 0 ? "[]" : `[${tags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(", ")}]`;
 
@@ -4665,7 +4666,7 @@ function buildMarkdown(meta, body, settings) {
     settings,
     compactWithHours
   );
-  const frontMatter = buildFrontMatter(meta, settings, created, tagsYaml);
+  const frontMatter = buildFrontMatter(meta, settings, created, tagsCsv, tagsYaml);
 
   const page = extractPageIndex(location.href);
   const embedIframe = buildBilibiliEmbedIframe(meta, page);
@@ -4690,9 +4691,12 @@ function buildMarkdown(meta, body, settings) {
   return lines.join("\n");
 }
 
-function buildFrontMatter(meta, settings, created, tagsYaml) {
+function buildFrontMatter(meta, settings, created, tagsCsv, tagsYaml) {
   const enabled = getEnabledFrontmatterFields(settings);
-  const fixedPropertyLines = getFixedFrontmatterPropertyLines(settings);
+  const fixedPropertyLines = getFixedFrontmatterPropertyLines(
+    settings,
+    buildFrontmatterTemplateContext(meta, created, tagsCsv, tagsYaml)
+  );
   if (enabled.length === 0 && fixedPropertyLines.length === 0) {
     return "";
   }
@@ -4735,7 +4739,7 @@ function getEnabledFrontmatterFields(settings) {
   return unique;
 }
 
-function getFixedFrontmatterPropertyLines(settings) {
+function getFixedFrontmatterPropertyLines(settings, templateContext = {}) {
   const customPropertyKeyPattern = /^[\p{L}\p{N}_\-\s]+$/u;
   const systemFields = new Set(
     (Array.isArray(DEFAULT_SETTINGS.frontmatterFields) ? DEFAULT_SETTINGS.frontmatterFields : []).map((field) =>
@@ -4761,7 +4765,7 @@ function getFixedFrontmatterPropertyLines(settings) {
       return;
     }
     seenKeys.add(lowerKey);
-    const yamlLine = formatFixedPropertyYamlLine(key, type, value);
+    const yamlLine = formatFixedPropertyYamlLine(key, type, value, templateContext);
     if (yamlLine) {
       lines.push(yamlLine);
     }
@@ -4772,25 +4776,69 @@ function getFixedFrontmatterPropertyLines(settings) {
 
 function normalizeFixedPropertyType(value) {
   const type = String(value || "").trim().toLowerCase();
-  return type === "number" || type === "checkbox" || type === "list" ? type : "text";
+  return type === "number" || type === "checkbox" || type === "list" || type === "date" ? type : "text";
 }
 
 function isFixedPropertyRowEffectivelyEmpty(type, value) {
   return !String(value || "").trim();
 }
 
-function formatFixedPropertyYamlLine(key, type, value) {
+function buildFrontmatterTemplateContext(meta, created, tagsCsv, tagsYaml) {
+  return {
+    title: String(meta?.title || "").trim(),
+    url: String(cleanVideoUrl() || "").trim(),
+    bvid: String(meta?.bvid || "").trim(),
+    cid: String(meta?.cid || "").trim(),
+    author: String(meta?.author || "unknown").trim(),
+    upload_date: String(meta?.uploadDate || "unknown").trim(),
+    subtitle_lang: String(meta?.selectedSubtitleLang || "unknown").trim(),
+    created: String(created || "").trim(),
+    tags: String(tagsCsv || "").trim(),
+    tags_csv: String(tagsCsv || "").trim(),
+    tags_yaml: String(tagsYaml || "").trim()
+  };
+}
+
+function resolveFrontmatterTemplateValue(value, templateContext = {}) {
+  return String(value || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, rawKey) => {
+    const key = String(rawKey || "").trim().toLowerCase();
+    if (!key) {
+      return "";
+    }
+    const resolved = templateContext[key];
+    return resolved == null ? "" : String(resolved);
+  });
+}
+
+function isYamlDateValue(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+}
+
+function parseFrontmatterArrayItems(value) {
+  return String(value || "")
+    .split(/[，,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatFixedPropertyYamlLine(key, type, value, templateContext = {}) {
   const normalizedType = normalizeFixedPropertyType(type);
+  const resolvedValue = resolveFrontmatterTemplateValue(value, templateContext).trim();
+
+  if (!resolvedValue) {
+    return "";
+  }
+
   if (normalizedType === "number") {
-    const num = Number(String(value || "").trim());
+    const num = Number(resolvedValue);
     if (!Number.isFinite(num)) {
       return "";
     }
-    return `${key}: ${String(value).trim()}`;
+    return `${key}: ${resolvedValue}`;
   }
 
   if (normalizedType === "checkbox") {
-    const normalizedValue = String(value || "").trim().toLowerCase();
+    const normalizedValue = resolvedValue.toLowerCase();
     if (normalizedValue !== "true" && normalizedValue !== "false") {
       return "";
     }
@@ -4798,14 +4846,18 @@ function formatFixedPropertyYamlLine(key, type, value) {
   }
 
   if (normalizedType === "list") {
-    const items = String(value || "")
-      .split(/[，,]/)
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const items = parseFrontmatterArrayItems(resolvedValue);
     return `${key}: [${items.map((item) => `"${escapeYaml(item)}"`).join(", ")}]`;
   }
 
-  return `${key}: "${escapeYaml(value)}"`;
+  if (normalizedType === "date") {
+    if (!isYamlDateValue(resolvedValue)) {
+      return "";
+    }
+    return `${key}: ${resolvedValue}`;
+  }
+
+  return `${key}: "${escapeYaml(resolvedValue)}"`;
 }
 
 function buildSubtitleSectionLines(body, chapters, settings, withHours) {

@@ -25,7 +25,9 @@ const DEFAULT_SETTINGS = {
 
 const SYSTEM_FRONTMATTER_FIELDS = new Set(DEFAULT_SETTINGS.frontmatterFields.map((field) => String(field).toLowerCase()));
 const CUSTOM_PROPERTY_KEY_PATTERN = /^[\p{L}\p{N}_\-\s]+$/u;
-const FIXED_PROPERTY_TYPES = new Set(["text", "number", "checkbox", "list"]);
+const FIXED_PROPERTY_TYPES = new Set(["text", "number", "checkbox", "list", "date"]);
+const FRONTMATTER_TEMPLATE_TOKEN_RE = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/;
+const FRONTMATTER_DATE_VALUE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const AI_PRESETS = [
   { id: "openai_compat", name: "OpenAI 兼容", baseUrl: "https://api.openai.com/v1", requiresKey: true },
@@ -419,11 +421,13 @@ function validateFixedFrontmatterProperties(items) {
     if (!CUSTOM_PROPERTY_KEY_PATTERN.test(key)) {
       return { ok: false, row: item.row, message: "属性名仅支持中文、英文、数字、空格、下划线和短横线" };
     }
+    const hasTemplateToken = containsFrontmatterTemplateToken(valueText);
+
     if (type === "number") {
       if (!valueText) {
         return { ok: false, row: item.row, message: "请填写数字类型的属性值" };
       }
-      if (!Number.isFinite(Number(valueText))) {
+      if (!hasTemplateToken && !Number.isFinite(Number(valueText))) {
         return { ok: false, row: item.row, message: "数字类型的属性值必须是有效数字" };
       }
     } else if (type === "checkbox") {
@@ -431,8 +435,15 @@ function validateFixedFrontmatterProperties(items) {
         return { ok: false, row: item.row, message: "请填写复选框类型的属性值" };
       }
       const normalizedCheckboxValue = valueText.toLowerCase();
-      if (normalizedCheckboxValue !== "true" && normalizedCheckboxValue !== "false") {
+      if (!hasTemplateToken && normalizedCheckboxValue !== "true" && normalizedCheckboxValue !== "false") {
         return { ok: false, row: item.row, message: "复选框类型的属性值只能填写 true 或 false" };
+      }
+    } else if (type === "date") {
+      if (!valueText) {
+        return { ok: false, row: item.row, message: "请填写日期类型的属性值" };
+      }
+      if (!hasTemplateToken && !FRONTMATTER_DATE_VALUE_RE.test(valueText)) {
+        return { ok: false, row: item.row, message: "日期类型请填写 YYYY-MM-DD，或使用 {{upload_date}} 这类变量" };
       }
     } else if (!valueText) {
       return { ok: false, row: item.row, message: "请填写固定属性的属性值" };
@@ -493,6 +504,10 @@ function isFixedPropertyRowEffectivelyEmpty(type, value) {
   return !String(value || "").trim();
 }
 
+function containsFrontmatterTemplateToken(value) {
+  return FRONTMATTER_TEMPLATE_TOKEN_RE.test(String(value || "").trim());
+}
+
 function readFixedPropertyValue(row, _type = normalizeFixedPropertyType(row.querySelector(".fixed-property-type")?.value)) {
   return String(row.querySelector(".fixed-property-value")?.value || "").trim();
 }
@@ -506,6 +521,8 @@ function buildFixedPropertyValueControl(type, value) {
         ? "true / false"
         : normalizedType === "list"
           ? "多个值，用逗号分隔"
+          : normalizedType === "date"
+            ? "YYYY-MM-DD 或 {{upload_date}}"
           : "属性值";
   return `<input class="fixed-property-value" type="text" placeholder="${placeholder}" value="${escapeAttribute(value)}" />`;
 }
@@ -525,6 +542,7 @@ function buildFixedPropertyTypePicker(type) {
         <button class="fixed-property-type-option" type="button" data-type="number">数字</button>
         <button class="fixed-property-type-option" type="button" data-type="checkbox">复选框</button>
         <button class="fixed-property-type-option" type="button" data-type="list">列表</button>
+        <button class="fixed-property-type-option" type="button" data-type="date">日期</button>
       </div>
     </div>
   `;
@@ -540,6 +558,9 @@ function getFixedPropertyTypeLabel(type) {
   }
   if (normalizedType === "list") {
     return "列表";
+  }
+  if (normalizedType === "date") {
+    return "日期";
   }
   return "文本";
 }
