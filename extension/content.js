@@ -28,7 +28,7 @@ const DEFAULT_SETTINGS = {
   fixedFrontmatterProperties: []
 };
 
-const BOC_VERSION = "1.0.18";
+const BOC_VERSION = "1.1.0";
 const CACHE_KEY_PREFIX = "boc_subtitle_cache_";
 globalThis.__BOC_CONTENT_SCRIPT_LOADED__ = BOC_VERSION;
 const state = {
@@ -453,6 +453,75 @@ function bindRuntimeEvents() {
         });
       }
       sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === "sidepanel-get-context") {
+      const settings = state.settings || DEFAULT_SETTINGS;
+      const body = state.subtitleBody || [];
+      let subtitleMarkdown = "";
+      try {
+        subtitleMarkdown = body.length ? buildMarkdown(state, body, settings) : "";
+      } catch (e) {
+        subtitleMarkdown = "";
+        logWarn("[BOC] sidepanel-get-context: buildMarkdown failed", e);
+      }
+      sendResponse({
+        ok: true,
+        payload: {
+          url: location.href,
+          title: state.title || "",
+          author: state.author || "",
+          uploadDate: state.uploadDate || "",
+          bvid: state.bvid || "",
+          cid: state.cid || "",
+          aid: state.aid || "",
+          subtitleBody: body,
+          subtitleMarkdown,
+          subtitleLang: state.currentSubtitleLang || "",
+          subtitleOptions: state.subtitles || [],
+          hotComments: []
+        }
+      });
+      return false;
+    }
+
+    if (message.type === "sidepanel-get-hot-comments") {
+      const count = 20; // 固定取前 20 条热门评论
+      if (!count) {
+        sendResponse({ ok: true, comments: [] });
+        return false;
+      }
+
+      let aid = Number(state.aid) || 0;
+      if (!aid && typeof window !== "undefined") {
+        try {
+          aid = Number(window?.__INITIAL_STATE__?.aid) || 0;
+        } catch {}
+      }
+      if (!aid) {
+        sendResponse({ ok: true, comments: [], note: "无法获取视频 aid" });
+        return false;
+      }
+
+      const url = `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=3&ps=${count}&pn=1`;
+      sendRuntimeMessage({ type: "fetch-json", url })
+        .then((resp) => {
+          if (!resp?.ok) {
+            sendResponse({ ok: true, comments: [], note: resp?.error || "评论接口失败" });
+            return;
+          }
+          const replies = Array.isArray(resp?.data?.data?.replies) ? resp.data.data.replies : [];
+          const hotComments = replies.slice(0, count).map((r) => ({
+            uname: r?.member?.uname || "匿名",
+            like: r?.like || 0,
+            message: String(r?.content?.message || "").slice(0, 500)
+          }));
+          sendResponse({ ok: true, comments: hotComments });
+        })
+        .catch((error) => {
+          sendResponse({ ok: true, comments: [], note: String(error?.message || error) });
+        });
       return true;
     }
 

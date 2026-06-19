@@ -25,6 +25,16 @@ const SYSTEM_FRONTMATTER_FIELDS = new Set(DEFAULT_SETTINGS.frontmatterFields.map
 const CUSTOM_PROPERTY_KEY_PATTERN = /^[\p{L}\p{N}_\-\s]+$/u;
 const FIXED_PROPERTY_TYPES = new Set(["text", "number", "checkbox", "list"]);
 
+const AI_PRESETS = [
+  { id: "openai_compat", name: "OpenAI 兼容", baseUrl: "https://api.openai.com/v1", requiresKey: true },
+  { id: "deepseek",      name: "DeepSeek",    baseUrl: "https://api.deepseek.com/v1", requiresKey: true },
+  { id: "zhipu",         name: "智谱 GLM",    baseUrl: "https://open.bigmodel.cn/api/paas/v4", requiresKey: true },
+  { id: "moonshot",      name: "Moonshot",    baseUrl: "https://api.moonshot.cn/v1", requiresKey: true },
+  { id: "openrouter",    name: "OpenRouter",  baseUrl: "https://openrouter.ai/api/v1", requiresKey: true },
+  { id: "ollama",        name: "Ollama (本地)", baseUrl: "http://localhost:11434/v1", requiresKey: false },
+  { id: "custom",        name: "自定义",      baseUrl: "", requiresKey: true }
+];
+
 const elements = {
   noteFolder: document.getElementById("noteFolder"),
   obsidianApiBaseUrl: document.getElementById("obsidianApiBaseUrl"),
@@ -38,6 +48,9 @@ const elements = {
   fixedPropertiesList: document.getElementById("fixedPropertiesList"),
   fixedPropertiesEmpty: document.getElementById("fixedPropertiesEmpty"),
   addFixedPropertyBtn: document.getElementById("addFixedPropertyBtn"),
+  aiProvidersList: document.getElementById("aiProvidersList"),
+  aiProvidersEmpty: document.getElementById("aiProvidersEmpty"),
+  addAiProviderBtn: document.getElementById("addAiProviderBtn"),
   saveBtn: document.getElementById("saveBtn"),
   testConnectionBtn: document.getElementById("testConnectionBtn"),
   status: document.getElementById("status")
@@ -50,6 +63,7 @@ function init() {
   elements.saveBtn.addEventListener("click", saveSettings);
   elements.testConnectionBtn.addEventListener("click", testConnection);
   elements.addFixedPropertyBtn.addEventListener("click", () => addFixedPropertyRow());
+  elements.addAiProviderBtn.addEventListener("click", () => addAiProviderRow());
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest(".fixed-property-type-picker")) {
       closeAllFixedPropertyMenus();
@@ -75,6 +89,10 @@ async function loadSettings() {
     checkbox.checked = selectedFields.has(checkbox.value);
   });
   renderFixedPropertyRows(settings.fixedFrontmatterProperties);
+
+  // AI 配置
+  const providers = await loadAiProviders();
+  renderAiProviders(providers);
 }
 
 async function saveSettings() {
@@ -83,6 +101,12 @@ async function saveSettings() {
   const validation = validateSettings(payload, { requireApiKey: false });
   if (!validation.ok) {
     applyValidationError(validation);
+    return;
+  }
+  const aiProvidersPayload = collectAiProviders();
+  const aiProvidersValidation = validateAiProviders(aiProvidersPayload);
+  if (!aiProvidersValidation.ok) {
+    applyValidationError(aiProvidersValidation);
     return;
   }
 
@@ -94,7 +118,20 @@ async function saveSettings() {
       return;
     }
     renderFixedPropertyRows(payload.fixedFrontmatterProperties);
-    setStatus(payload.obsidianApiKey ? "保存成功" : "保存成功（未填写 API Key，暂不可写入 Obsidian）");
+
+    // AI 平台：list 走 sync、apiKey 走 local
+    const aiResp = await sendRuntimeMessage({ type: "ai-providers-save", providers: aiProvidersPayload });
+    if (!aiResp?.ok) {
+      setStatus(`已保存，但 AI 平台保存失败：${aiResp?.error || "未知错误"}`, true);
+      return;
+    }
+    // 用最新列表（含 hasSavedKey）重新渲染，避免误以为 Key 丢了
+    renderAiProviders(aiResp.providers || []);
+    setStatus(
+      payload.obsidianApiKey
+        ? "保存成功"
+        : "保存成功（未填写 Local REST API Key，暂不可写入 Obsidian）"
+    );
   } catch (error) {
     setStatus(error.message || "保存失败", true);
   } finally {
@@ -591,4 +628,177 @@ function sendRuntimeMessage(message) {
       resolve(resp);
     });
   });
+}
+
+// ===== AI 模型平台 =====
+
+async function loadAiProviders() {
+  try {
+    const resp = await sendRuntimeMessage({ type: "ai-providers-list" });
+    if (!resp?.ok) return [];
+    return Array.isArray(resp.providers) ? resp.providers : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderAiProviders(items) {
+  elements.aiProvidersList.innerHTML = "";
+  const list = Array.isArray(items) ? items : [];
+  list.forEach((item) => addAiProviderRow(item));
+  updateAiProvidersEmptyState();
+}
+
+function updateAiProvidersEmptyState() {
+  const hasRows = elements.aiProvidersList.children.length > 0;
+  elements.aiProvidersEmpty.hidden = hasRows;
+}
+
+function generateAiProviderId() {
+  return `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function addAiProviderRow(item = {}) {
+  const id = String(item.id || generateAiProviderId());
+  const presetId = String(item.presetId || "custom");
+  const preset = AI_PRESETS.find((p) => p.id === presetId) || AI_PRESETS[AI_PRESETS.length - 1];
+  const baseUrl = String(item.baseUrl ?? preset.baseUrl ?? "");
+  const model = String(item.model || "");
+  const requiresKey = item.requiresKey !== false && preset.requiresKey !== false;
+  const enabled = item.enabled !== false;
+  const hasSavedKey = Boolean(item.hasSavedKey);
+
+  const row = document.createElement("div");
+  row.className = "ai-provider-row";
+  row.dataset.providerId = id;
+  row.dataset.hasSavedKey = hasSavedKey ? "1" : "0";
+  row.innerHTML = `
+    <select class="ai-provider-preset" title="平台">
+      ${AI_PRESETS.map((p) => `<option value="${escapeAttribute(p.id)}" ${p.id === presetId ? "selected" : ""}>${escapeAttribute(p.name)}</option>`).join("")}
+    </select>
+    <input class="ai-provider-baseurl" type="text" placeholder="baseUrl（如 https://api.openai.com/v1）" value="${escapeAttribute(baseUrl)}" />
+    <input class="ai-provider-model" type="text" placeholder="模型名（如 gpt-4o-mini）" value="${escapeAttribute(model)}" />
+    <input class="ai-provider-apikey" type="password" placeholder="${hasSavedKey ? "API Key（已保存，留空不修改）" : (requiresKey ? "API Key" : "API Key（可选）")}" autocomplete="off" />
+    <label class="ai-provider-toggle" title="启用">
+      <input class="ai-provider-enabled" type="checkbox" ${enabled ? "checked" : ""} />
+      <span>启用</span>
+    </label>
+    <button type="button" class="secondary-btn ai-provider-test">测试</button>
+    <button type="button" class="ai-provider-remove" aria-label="删除" title="删除">
+      <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+        <path d="M4 7h16"></path>
+        <path d="M9 3h6"></path>
+        <path d="M10 11v6"></path>
+        <path d="M14 11v6"></path>
+        <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"></path>
+      </svg>
+    </button>
+    <p class="ai-provider-status" hidden></p>
+  `;
+
+  row.querySelector(".ai-provider-preset").addEventListener("change", (e) => {
+    const next = AI_PRESETS.find((p) => p.id === e.target.value);
+    if (!next) return;
+    const baseUrlInput = row.querySelector(".ai-provider-baseurl");
+    if (!baseUrlInput.value.trim()) {
+      baseUrlInput.value = next.baseUrl;
+    }
+    const apikeyInput = row.querySelector(".ai-provider-apikey");
+    apikeyInput.placeholder = next.requiresKey ? "API Key" : "API Key（可选）";
+  });
+
+  row.querySelector(".ai-provider-remove")?.addEventListener("click", async () => {
+    if (!confirm("确定要删除这个平台吗？")) return;
+    if (row.dataset.providerId) {
+      try {
+        await sendRuntimeMessage({ type: "ai-providers-delete", providerId: row.dataset.providerId });
+      } catch {}
+    }
+    row.remove();
+    updateAiProvidersEmptyState();
+  });
+
+  row.querySelector(".ai-provider-test")?.addEventListener("click", async () => {
+    const statusNode = row.querySelector(".ai-provider-status");
+    const baseUrl = row.querySelector(".ai-provider-baseurl").value.trim();
+    const apiKey = row.querySelector(".ai-provider-apikey").value.trim() || (hasSavedKey ? "__USE_SAVED__" : "");
+    if (!baseUrl) {
+      showAiProviderStatus(statusNode, "请填写 baseUrl", true);
+      return;
+    }
+    showAiProviderStatus(statusNode, "正在测试...");
+    const resp = await sendRuntimeMessage({
+      type: "ai-providers-test",
+      baseUrl,
+      apiKey: apiKey === "__USE_SAVED__" ? "" : apiKey
+    });
+    if (resp?.ok) {
+      const modelsText = Array.isArray(resp.models) && resp.models.length
+        ? `（已列出 ${resp.models.length} 个模型）`
+        : "";
+      showAiProviderStatus(statusNode, `连接成功${modelsText}`);
+    } else {
+      showAiProviderStatus(statusNode, `失败：${resp?.error || "未知错误"}`, true);
+    }
+  });
+
+  elements.aiProvidersList.appendChild(row);
+  updateAiProvidersEmptyState();
+}
+
+function showAiProviderStatus(node, text, isError = false) {
+  if (!node) return;
+  node.hidden = false;
+  node.textContent = text;
+  node.dataset.error = isError ? "true" : "false";
+}
+
+function collectAiProviders() {
+  return Array.from(elements.aiProvidersList.querySelectorAll(".ai-provider-row")).map((row) => {
+    const presetSelect = row.querySelector(".ai-provider-preset");
+    const preset = AI_PRESETS.find((p) => p.id === presetSelect.value) || AI_PRESETS[AI_PRESETS.length - 1];
+    const enabled = Boolean(row.querySelector(".ai-provider-enabled")?.checked);
+    const apiKey = row.querySelector(".ai-provider-apikey").value.trim();
+    const baseUrl = row.querySelector(".ai-provider-baseurl").value.trim().replace(/\/+$/, "");
+    return {
+      id: row.dataset.providerId || generateAiProviderId(),
+      presetId: preset.id,
+      name: preset.name,
+      baseUrl,
+      model: row.querySelector(".ai-provider-model").value.trim(),
+      temperature: 0.7,
+      requiresKey: preset.requiresKey,
+      enabled,
+      apiKey,
+      hasSavedKey: row.dataset.hasSavedKey === "1"
+    };
+  });
+}
+
+function validateAiProviders(items) {
+  const seenIds = new Set();
+  for (const item of items) {
+    if (!item.baseUrl) {
+      return { ok: false, message: "每个平台都需要填写 baseUrl" };
+    }
+    try {
+      const u = new URL(item.baseUrl);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        return { ok: false, message: `baseUrl 必须以 http(s):// 开头（${item.baseUrl}）` };
+      }
+    } catch {
+      return { ok: false, message: `baseUrl 格式不正确：${item.baseUrl}` };
+    }
+    if (item.requiresKey && !item.apiKey && !item.hasSavedKey) {
+      return { ok: false, message: `平台「${item.name}」需要填写 API Key` };
+    }
+    if (!item.model) {
+      return { ok: false, message: `平台「${item.name}」需要填写模型名` };
+    }
+    if (seenIds.has(item.id)) {
+      return { ok: false, message: "平台 id 重复，请刷新页面后重试" };
+    }
+    seenIds.add(item.id);
+  }
+  return { ok: true };
 }

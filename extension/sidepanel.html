@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 助手</title>
+    <link rel="stylesheet" href="./sidepanel.css" />
+  </head>
+  <body>
+    <header class="sp-header">
+      <strong class="sp-title">AI 助手</strong>
+      <span class="sp-context-chip" id="spContextChip" title="">加载中...</span>
+      <select id="spModelSelect" class="sp-model-select" aria-label="选择模型平台"></select>
+      <button id="spSettingsBtn" type="button" class="sp-icon-btn" title="打开设置" aria-label="设置">⚙</button>
+    </header>
+    <main class="sp-messages" id="spMessages">
+      <div class="sp-suggestions" id="spSuggestions"></div>
+    </main>
+    <footer class="sp-footer">
+      <div class="sp-toolbar">
+        <button id="spNewChatBtn" type="button" class="sp-toolbar-btn" title="开启新对话">
+          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+          <span>开启新对话</span>
+        </button>
+      </div>
+      <div class="sp-input-row">
+        <textarea
+          id="spInput"
+          rows="2"
+          placeholder="问点什么…  Shift+Enter 换行"
+          autocomplete="off"
+        ></textarea>
+        <button id="spSendBtn" type="button" class="sp-send-btn">发送</button>
+      </div>
+    </footer>
+    <script type="module" src="./sidepanel.js"></script>
+  </body>
+</html>

@@ -359,7 +359,82 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "ai-providers-list") {
+    loadAiProviders()
+      .then((items) => sendResponse({ ok: true, providers: items }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-providers-save") {
+    saveAiProviders(message.providers || [])
+      .then((items) => sendResponse({ ok: true, providers: items }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-provider-set-key") {
+    saveAiProviderKey(String(message.providerId || ""), String(message.apiKey || ""))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-providers-delete") {
+    deleteAiProvider(String(message.providerId || ""))
+      .then((items) => sendResponse({ ok: true, providers: items }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-providers-test") {
+    const baseUrl = String(message.baseUrl || "").trim();
+    const apiKey = String(message.apiKey || "").trim();
+    if (!baseUrl) {
+      sendResponse({ ok: false, error: "请填写 baseUrl" });
+      return false;
+    }
+    testAiConnection({ baseUrl, apiKey })
+      .then((resp) => sendResponse(resp))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   return false;
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (!port || port.name !== "sidepanel-chat") {
+    return;
+  }
+
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || msg.action !== "chat") return;
+
+    try {
+      const providers = await loadAiProviders();
+      const provider = providers.find((p) => p.id === msg.providerId);
+      if (!provider) {
+        port.postMessage({ type: "error", error: "未找到选中的平台" });
+        return;
+      }
+      const keys = await loadAiProviderKeys();
+      const apiKey = keys[provider.id] || "";
+      if (provider.requiresKey !== false && !apiKey) {
+        port.postMessage({ type: "error", error: "该平台 API Key 未配置" });
+        return;
+      }
+      await streamChat({
+        provider: { ...provider, apiKey },
+        context: msg.context || {},
+        userPrompt: msg.prompt || "",
+        history: Array.isArray(msg.history) ? msg.history : [],
+        port
+      });
+    } catch (e) {
+      port.postMessage({ type: "error", error: String(e?.message || e) });
+    }
+  });
 });
 
 async function initializeSettingsStorage() {
@@ -517,4 +592,240 @@ function formatConnectionError(error) {
     return "无法连接 Local REST API。请检查地址、HTTP/HTTPS 模式和证书信任。";
   }
   return message;
+}
+
+// ===== AI 模型平台存储 =====
+
+const AI_PROVIDER_KEYS_STORAGE = "aiProviderKeys";
+
+function normalizeAiProvider(item) {
+  if (!item || typeof item !== "object") return null;
+  const id = String(item.id || "").trim();
+  if (!id) return null;
+  return {
+    id,
+    presetId: String(item.presetId || "custom"),
+    name: String(item.name || "自定义").trim() || "自定义",
+    baseUrl: String(item.baseUrl || "").trim().replace(/\/+$/, ""),
+    model: String(item.model || "").trim(),
+    temperature: typeof item.temperature === "number" ? item.temperature : 0.7,
+    requiresKey: item.requiresKey !== false,
+    enabled: item.enabled !== false
+  };
+}
+
+async function loadAiProviders() {
+  const [syncData, keys] = await Promise.all([
+    chrome.storage.sync.get(["aiProviders"]),
+    loadAiProviderKeys()
+  ]);
+  const list = Array.isArray(syncData.aiProviders) ? syncData.aiProviders : [];
+  return list
+    .map(normalizeAiProvider)
+    .filter(Boolean)
+    .map((p) => ({ ...p, hasSavedKey: Boolean(keys[p.id]) }));
+}
+
+async function saveAiProviders(items) {
+  const rawList = Array.isArray(items) ? items : [];
+  const keys = await loadAiProviderKeys();
+  const nextList = [];
+  for (const raw of rawList) {
+    const normalized = normalizeAiProvider(raw);
+    if (!normalized) continue;
+    nextList.push(normalized);
+    const incomingKey = String(raw?.apiKey || "").trim();
+    if (incomingKey) {
+      keys[normalized.id] = incomingKey;
+    }
+  }
+  await Promise.all([
+    chrome.storage.sync.set({ aiProviders: nextList }),
+    chrome.storage.local.set({ [AI_PROVIDER_KEYS_STORAGE]: keys })
+  ]);
+  // 返回带 hasSavedKey 的列表，方便前端渲染占位
+  return nextList.map((p) => ({ ...p, hasSavedKey: Boolean(keys[p.id]) }));
+}
+
+async function deleteAiProvider(providerId) {
+  const list = await loadAiProviders();
+  const next = list.filter((p) => p.id !== providerId);
+  await chrome.storage.sync.set({ aiProviders: next });
+  const keys = await loadAiProviderKeys();
+  if (keys && providerId in keys) {
+    delete keys[providerId];
+    await chrome.storage.local.set({ [AI_PROVIDER_KEYS_STORAGE]: keys });
+  }
+  return next;
+}
+
+async function loadAiProviderKeys() {
+  const localData = await chrome.storage.local.get([AI_PROVIDER_KEYS_STORAGE]);
+  const keys = localData?.[AI_PROVIDER_KEYS_STORAGE];
+  return keys && typeof keys === "object" ? keys : {};
+}
+
+async function saveAiProviderKey(providerId, apiKey) {
+  const keys = await loadAiProviderKeys();
+  const trimmed = String(apiKey || "").trim();
+  if (trimmed) {
+    keys[providerId] = trimmed;
+  } else {
+    delete keys[providerId];
+  }
+  await chrome.storage.local.set({ [AI_PROVIDER_KEYS_STORAGE]: keys });
+  return keys;
+}
+
+// ===== AI 调用（内联实现，避免 service worker 跨文件 import） =====
+
+function buildAiMessages({ context, userPrompt, history }) {
+  const ctx = context || {};
+  const sections = [
+    `你是一个 B 站视频助手。当前用户正在看一个视频，标题：「${ctx.title || "未知"}」`,
+    `作者：${ctx.author || "未知"} | 上传日期：${ctx.uploadDate || "未知"}`
+  ];
+  if (ctx.subtitleMarkdown) {
+    sections.push(`以下是视频的字幕全文：\n\n${ctx.subtitleMarkdown}`);
+  } else {
+    sections.push("（暂无字幕）");
+  }
+  if (Array.isArray(ctx.hotComments) && ctx.hotComments.length) {
+    const block = ctx.hotComments
+      .map((c, i) => `${i + 1}. ${c.uname || "匿名"}（赞 ${c.like || 0}）: ${c.message || ""}`)
+      .join("\n");
+    sections.push(`以下是按热度排序的前 ${ctx.hotComments.length} 条热门评论：\n\n${block}`);
+  }
+  return [
+    { role: "system", content: sections.join("\n\n") },
+    ...(Array.isArray(history) ? history.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string") : []),
+    { role: "user", content: String(userPrompt || "") }
+  ];
+}
+
+function clipAiSubtitle(markdown, maxChars = 8000) {
+  const text = String(markdown || "");
+  if (!text || text.length <= maxChars) return text;
+  return text.slice(0, maxChars) + "\n\n...（字幕过长，已截断）";
+}
+
+async function* parseOpenAISSE(response) {
+  if (!response || !response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.length ? lines.pop() : "";
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return;
+      if (!data) continue;
+      try {
+        const json = JSON.parse(data);
+        const delta = json?.choices?.[0]?.delta?.content;
+        if (delta) yield String(delta);
+      } catch {}
+    }
+  }
+}
+
+async function streamChat({ provider, context, userPrompt, history, port }) {
+  if (!port) return;
+  const baseUrl = String(provider?.baseUrl || "").trim().replace(/\/+$/, "");
+  if (!baseUrl) {
+    port.postMessage({ type: "error", error: "baseUrl 未配置" });
+    return;
+  }
+  if (!provider.model) {
+    port.postMessage({ type: "error", error: "模型未配置" });
+    return;
+  }
+
+  const messages = buildAiMessages({
+    context: { ...context, subtitleMarkdown: clipAiSubtitle(context?.subtitleMarkdown) },
+    userPrompt,
+    history
+  });
+
+  const headers = { "Content-Type": "application/json" };
+  if (provider.apiKey) {
+    headers["Authorization"] = `Bearer ${provider.apiKey}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: provider.model,
+        messages,
+        stream: true,
+        temperature: typeof provider.temperature === "number" ? provider.temperature : 0.7
+      })
+    });
+  } catch (e) {
+    port.postMessage({ type: "error", error: `网络错误：${e?.message || e}` });
+    return;
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try { detail = (await response.text()).slice(0, 200); } catch {}
+    port.postMessage({ type: "error", error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` });
+    return;
+  }
+
+  try {
+    for await (const token of parseOpenAISSE(response)) {
+      port.postMessage({ type: "token", data: token });
+    }
+    port.postMessage({ type: "done" });
+  } catch (e) {
+    port.postMessage({ type: "error", error: String(e?.message || e) });
+  }
+}
+
+async function testAiConnection({ baseUrl, apiKey }) {
+  const url = `${String(baseUrl || "").trim().replace(/\/+$/, "")}/models`;
+  const headers = { Accept: "application/json" };
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+  // 401/403 不重试（重试也无意义），其他错误重试一次
+  const shouldRetry = (status) => status >= 500 || status === 408 || status === 429;
+  const delays = [0, 700];
+
+  let lastError = "";
+  for (let i = 0; i < delays.length; i += 1) {
+    if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
+    let response;
+    try {
+      response = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    } catch (e) {
+      lastError = `无法连接：${e?.message || e}`;
+      continue;
+    }
+    if (response.ok) {
+      let models = [];
+      try {
+        const data = await response.json();
+        if (Array.isArray(data?.data)) models = data.data.map((m) => m?.id).filter(Boolean);
+      } catch {}
+      return { ok: true, models };
+    }
+    let detail = "";
+    try { detail = (await response.text()).slice(0, 200); } catch {}
+    const errText = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+    if (!shouldRetry(response.status) || i === delays.length - 1) {
+      return { ok: false, error: errText };
+    }
+    lastError = errText;
+  }
+  return { ok: false, error: lastError || "未知错误" };
 }

@@ -12,6 +12,7 @@ const el = {
   downloadBtn: document.getElementById("downloadBtn"),
   sendBtn: document.getElementById("sendBtn"),
   readingViewBtn: document.getElementById("readingViewBtn"),
+  aiBtn: document.getElementById("aiBtn"),
   settingsBtn: document.getElementById("settingsBtn")
 };
 
@@ -135,6 +136,24 @@ function bindEvents() {
 
   el.settingsBtn.addEventListener("click", async () => {
     await sendToRuntime({ type: "open-options" });
+  });
+
+  el.aiBtn?.addEventListener("click", async () => {
+    const tab = await getActiveTab();
+    if (!tab?.id) {
+      setMessage("找不到当前标签页。");
+      return;
+    }
+    if (!chrome.sidePanel?.open) {
+      setMessage("当前浏览器不支持侧边栏，请使用 Chrome 114+ 或 Edge。");
+      return;
+    }
+    try {
+      await chrome.sidePanel.open({ tabId: tab.id });
+      window.setTimeout(() => window.close(), 80);
+    } catch (error) {
+      setMessage(`打开侧边栏失败：${error?.message || error}`);
+    }
   });
 }
 
