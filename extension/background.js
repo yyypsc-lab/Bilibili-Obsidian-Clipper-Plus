@@ -24,7 +24,9 @@ const DEFAULT_SYNC_SETTINGS = {
     "created",
     "tags"
   ],
-  fixedFrontmatterProperties: []
+  fixedFrontmatterProperties: [],
+  aiSystemPrompt: "结合字幕与评论理解视频，先给结论，再提炼重点，表达简洁，不要输出思考过程或 think 标签。",
+  aiPresetPrompts: []
 };
 
 const DEFAULT_LOCAL_SETTINGS = {
@@ -155,6 +157,74 @@ async function triggerReaderModeInTab(tabId, readerUrl = "", retries = 12, delay
   }
 
   return false;
+}
+
+function isSupportedAiTabUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.hostname !== "www.bilibili.com") {
+      return false;
+    }
+    return (
+      parsed.pathname === "/list/watchlater" ||
+      parsed.pathname === "/list/watchlater/" ||
+      parsed.pathname.startsWith("/video/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function getAiSidepanelState(tabId, { forceRefresh = false } = {}) {
+  if (!tabId) {
+    throw new Error("缺少标签页信息");
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.id || !isSupportedAiTabUrl(tab.url)) {
+    throw new Error("请先打开一个 B 站视频页。");
+  }
+
+  await ensureReaderContentReady(tab.id);
+
+  let contextResp = await sendMessageToTab(tab.id, { type: "sidepanel-get-context" });
+  const hasPayload = Boolean(contextResp?.ok && contextResp?.payload);
+  const hasLoadedClip = Boolean(
+    contextResp?.payload?.bvid ||
+    contextResp?.payload?.aid ||
+    contextResp?.payload?.title
+  );
+  const needsRefresh =
+    forceRefresh ||
+    !hasPayload ||
+    (!hasLoadedClip && (!Array.isArray(contextResp.payload.subtitleBody) || !contextResp.payload.subtitleBody.length));
+
+  if (needsRefresh) {
+    const refreshResp = await sendMessageToTab(tab.id, { type: "popup-refresh" });
+    if (!refreshResp?.ok) {
+      throw new Error(refreshResp?.error || "当前视频上下文加载失败");
+    }
+    contextResp = await sendMessageToTab(tab.id, { type: "sidepanel-get-context" });
+  }
+
+  if (!contextResp?.ok || !contextResp?.payload) {
+    throw new Error("当前页面上下文读取失败");
+  }
+
+  let hotComments = [];
+  try {
+    const commentsResp = await sendMessageToTab(tab.id, { type: "sidepanel-get-hot-comments" });
+    if (commentsResp?.ok && Array.isArray(commentsResp.comments)) {
+      hotComments = commentsResp.comments;
+    }
+  } catch {
+    // 评论失败时静默降级，避免阻断主流程
+  }
+
+  return {
+    ...contextResp.payload,
+    hotComments
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -389,13 +459,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "ai-providers-test") {
     const baseUrl = String(message.baseUrl || "").trim();
-    const apiKey = String(message.apiKey || "").trim();
+    const providerId = String(message.providerId || "").trim();
+    const model = String(message.model || "").trim();
     if (!baseUrl) {
       sendResponse({ ok: false, error: "请填写 baseUrl" });
       return false;
     }
-    testAiConnection({ baseUrl, apiKey })
+    Promise.resolve()
+      .then(async () => {
+        const directApiKey = String(message.apiKey || "").trim();
+        if (directApiKey) {
+          return directApiKey;
+        }
+        if (!providerId) {
+          return "";
+        }
+        const keys = await loadAiProviderKeys();
+        return String(keys[providerId] || "").trim();
+      })
+      .then((apiKey) => testAiConnection({ baseUrl, apiKey, model }))
       .then((resp) => sendResponse(resp))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-sidepanel-get-state") {
+    const tabId = Number(message.tabId || 0) || 0;
+    const forceRefresh = message.forceRefresh === true;
+    getAiSidepanelState(tabId, { forceRefresh })
+      .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
@@ -473,6 +565,8 @@ async function getMergedSettings() {
   merged.readerChapterVisibility = normalizeReaderChapterVisibility(merged.readerChapterVisibility);
   merged.readerTranscriptVisible = normalizeReaderTranscriptVisible(merged.readerTranscriptVisible);
   merged.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(merged.fixedFrontmatterProperties);
+  merged.aiSystemPrompt = normalizeAiSystemPrompt(merged.aiSystemPrompt);
+  merged.aiPresetPrompts = normalizeAiPresetPrompts(merged.aiPresetPrompts);
   let apiKey = normalizeApiKey(localSettings.obsidianApiKey);
   const legacySyncApiKey = normalizeApiKey(syncSettings.obsidianApiKey);
 
@@ -503,6 +597,8 @@ async function saveSettings(settings) {
   syncPayload.readerChapterVisibility = normalizeReaderChapterVisibility(syncPayload.readerChapterVisibility);
   syncPayload.readerTranscriptVisible = normalizeReaderTranscriptVisible(syncPayload.readerTranscriptVisible);
   syncPayload.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(syncPayload.fixedFrontmatterProperties);
+  syncPayload.aiSystemPrompt = normalizeAiSystemPrompt(syncPayload.aiSystemPrompt);
+  syncPayload.aiPresetPrompts = normalizeAiPresetPrompts(syncPayload.aiPresetPrompts);
 
   await Promise.all([
     chrome.storage.sync.set(syncPayload),
@@ -564,6 +660,20 @@ function normalizeFixedFrontmatterProperties(value) {
       value: normalizeFixedPropertyValue(item?.type, item?.value)
     }))
     .filter((item) => item.key && !isFixedPropertyRowEffectivelyEmpty(item.type, item.value));
+}
+
+function normalizeAiSystemPrompt(value) {
+  return toString(value).trim();
+}
+
+function normalizeAiPresetPrompts(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => toString(item).trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
 function normalizeFixedPropertyType(value) {
@@ -679,7 +789,7 @@ async function saveAiProviderKey(providerId, apiKey) {
 
 // ===== AI 调用（内联实现，避免 service worker 跨文件 import） =====
 
-function buildAiMessages({ context, userPrompt, history }) {
+function buildAiMessages({ context, userPrompt, history, systemPrompt }) {
   const ctx = context || {};
   const sections = [
     `你是一个 B 站视频助手。当前用户正在看一个视频，标题：「${ctx.title || "未知"}」`,
@@ -695,6 +805,10 @@ function buildAiMessages({ context, userPrompt, history }) {
       .map((c, i) => `${i + 1}. ${c.uname || "匿名"}（赞 ${c.like || 0}）: ${c.message || ""}`)
       .join("\n");
     sections.push(`以下是按热度排序的前 ${ctx.hotComments.length} 条热门评论：\n\n${block}`);
+  }
+  const customSystemPrompt = normalizeAiSystemPrompt(systemPrompt);
+  if (customSystemPrompt) {
+    sections.push(`以下是额外系统要求：\n${customSystemPrompt}`);
   }
   return [
     { role: "system", content: sections.join("\n\n") },
@@ -750,7 +864,8 @@ async function streamChat({ provider, context, userPrompt, history, port }) {
   const messages = buildAiMessages({
     context: { ...context, subtitleMarkdown: clipAiSubtitle(context?.subtitleMarkdown) },
     userPrompt,
-    history
+    history,
+    systemPrompt: context?.aiSystemPrompt || ""
   });
 
   const headers = { "Content-Type": "application/json" };
@@ -792,8 +907,9 @@ async function streamChat({ provider, context, userPrompt, history, port }) {
   }
 }
 
-async function testAiConnection({ baseUrl, apiKey }) {
-  const url = `${String(baseUrl || "").trim().replace(/\/+$/, "")}/models`;
+async function testAiConnection({ baseUrl, apiKey, model }) {
+  const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
+  const url = `${normalizedBaseUrl}/models`;
   const headers = { Accept: "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
@@ -823,9 +939,56 @@ async function testAiConnection({ baseUrl, apiKey }) {
     try { detail = (await response.text()).slice(0, 200); } catch {}
     const errText = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
     if (!shouldRetry(response.status) || i === delays.length - 1) {
-      return { ok: false, error: errText };
+      if (!model) {
+        return { ok: false, error: errText };
+      }
+      const chatProbe = await probeAiChatCompletion({
+        baseUrl: normalizedBaseUrl,
+        apiKey,
+        model,
+        headers
+      });
+      if (chatProbe.ok) {
+        return { ok: true, models: [], note: "chat-completions probe" };
+      }
+      return { ok: false, error: chatProbe.error || errText };
     }
     lastError = errText;
   }
   return { ok: false, error: lastError || "未知错误" };
+}
+
+async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
+  const requestHeaders = headers || { Accept: "application/json" };
+  if (apiKey && !requestHeaders.Authorization) {
+    requestHeaders.Authorization = `Bearer ${apiKey}`;
+  }
+  requestHeaders["Content-Type"] = "application/json";
+
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({
+        model,
+        stream: false,
+        temperature: 0,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "ping" }]
+      })
+    });
+  } catch (error) {
+    return { ok: false, error: `无法连接：${error?.message || error}` };
+  }
+
+  if (response.ok) {
+    return { ok: true };
+  }
+
+  let detail = "";
+  try {
+    detail = (await response.text()).slice(0, 200);
+  } catch {}
+  return { ok: false, error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
 }

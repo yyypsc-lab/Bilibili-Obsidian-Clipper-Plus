@@ -36,12 +36,14 @@ export function clipSubtitleForContext(markdown, maxChars = 8000) {
 
 export function buildSuggestedPrompts(context) {
   const prompts = [
-    `用 3 句话总结这个视频`,
-    `列出这个视频提到的主要观点`,
-    `翻译成英文给我看`
+    "用 3 句话总结这个视频",
+    "提炼这个视频的 5 个重点",
+    "按时间顺序整理这期视频的内容"
   ];
   if (context && Array.isArray(context.hotComments) && context.hotComments.length) {
-    prompts.push(`根据评论总结观众的看法`);
+    prompts.push("根据评论总结观众的看法");
+  } else {
+    prompts.push("把这期视频适合发朋友圈的观点摘出来");
   }
   return prompts;
 }

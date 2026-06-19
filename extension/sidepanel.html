@@ -8,9 +8,9 @@
   </head>
   <body>
     <header class="sp-header">
-      <strong class="sp-title">AI 助手</strong>
       <span class="sp-context-chip" id="spContextChip" title="">加载中...</span>
       <select id="spModelSelect" class="sp-model-select" aria-label="选择模型平台"></select>
+      <button id="spRefreshBtn" type="button" class="sp-icon-btn" title="刷新当前视频上下文" aria-label="刷新上下文">↻</button>
       <button id="spSettingsBtn" type="button" class="sp-icon-btn" title="打开设置" aria-label="设置">⚙</button>
     </header>
     <main class="sp-messages" id="spMessages">
@@ -25,15 +25,24 @@
           </svg>
           <span>开启新对话</span>
         </button>
+        <button id="spPresetBtn" type="button" class="sp-toolbar-btn" title="预设提示词">
+          <span>预设提示词</span>
+        </button>
+      </div>
+      <div id="spPresetPopover" class="sp-preset-popover" hidden>
+        <div id="spPresetList" class="sp-preset-list"></div>
+        <div class="sp-preset-editor">
+          <input id="spPresetInput" class="sp-preset-input" type="text" placeholder="添加预设提示词" />
+          <button id="spPresetAddBtn" type="button" class="sp-preset-add-btn">添加</button>
+        </div>
       </div>
       <div class="sp-input-row">
         <textarea
           id="spInput"
           rows="2"
-          placeholder="问点什么…  Shift+Enter 换行"
+          placeholder="回车发送，Shift+Enter 换行"
           autocomplete="off"
         ></textarea>
-        <button id="spSendBtn" type="button" class="sp-send-btn">发送</button>
       </div>
     </footer>
     <script type="module" src="./sidepanel.js"></script>

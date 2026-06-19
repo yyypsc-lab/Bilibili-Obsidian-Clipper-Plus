@@ -97,6 +97,24 @@ select {
   background: #fff;
 }
 
+textarea.settings-textarea {
+  width: 100%;
+  min-height: 104px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+textarea.settings-textarea.settings-textarea-compact {
+  min-height: 84px;
+}
+
 input.input-error,
 select.input-error {
   border-color: #dc2626;
@@ -496,10 +514,10 @@ ol {
   grid-template-columns: 96px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto auto auto;
   gap: 6px;
   align-items: center;
-  padding: 6px 8px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fafafa;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .ai-provider-row select,
@@ -514,6 +532,8 @@ ol {
   background: #fff;
   width: 100%;
   min-width: 0;
+  margin-bottom: 0;
+  align-self: center;
 }
 
 .ai-provider-toggle {
@@ -528,6 +548,7 @@ ol {
   white-space: nowrap;
   border-radius: 6px;
   cursor: pointer;
+  margin: 0;
 }
 
 .ai-provider-toggle input[type="checkbox"] {

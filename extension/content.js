@@ -478,7 +478,7 @@ function bindRuntimeEvents() {
           aid: state.aid || "",
           subtitleBody: body,
           subtitleMarkdown,
-          subtitleLang: state.currentSubtitleLang || "",
+          subtitleLang: state.selectedSubtitleLang || "",
           subtitleOptions: state.subtitles || [],
           hotComments: []
         }

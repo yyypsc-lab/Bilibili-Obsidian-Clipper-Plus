@@ -18,7 +18,9 @@ const DEFAULT_SETTINGS = {
     "created",
     "tags"
   ],
-  fixedFrontmatterProperties: []
+  fixedFrontmatterProperties: [],
+  aiSystemPrompt: "结合字幕与评论理解视频，先给结论，再提炼重点，表达简洁，不要输出思考过程或 think 标签。",
+  aiPresetPrompts: []
 };
 
 const SYSTEM_FRONTMATTER_FIELDS = new Set(DEFAULT_SETTINGS.frontmatterFields.map((field) => String(field).toLowerCase()));
@@ -51,10 +53,13 @@ const elements = {
   aiProvidersList: document.getElementById("aiProvidersList"),
   aiProvidersEmpty: document.getElementById("aiProvidersEmpty"),
   addAiProviderBtn: document.getElementById("addAiProviderBtn"),
+  aiSystemPrompt: document.getElementById("aiSystemPrompt"),
   saveBtn: document.getElementById("saveBtn"),
   testConnectionBtn: document.getElementById("testConnectionBtn"),
   status: document.getElementById("status")
 };
+
+let savedAiPresetPrompts = [];
 
 init();
 
@@ -89,6 +94,8 @@ async function loadSettings() {
     checkbox.checked = selectedFields.has(checkbox.value);
   });
   renderFixedPropertyRows(settings.fixedFrontmatterProperties);
+  elements.aiSystemPrompt.value = settings.aiSystemPrompt || "";
+  savedAiPresetPrompts = Array.isArray(settings.aiPresetPrompts) ? settings.aiPresetPrompts : [];
 
   // AI 配置
   const providers = await loadAiProviders();
@@ -180,7 +187,9 @@ function collectFormPayload() {
     includeTimestampInBody: elements.includeTimestampInBody.checked,
     enableDebugLogs: elements.enableDebugLogs.checked,
     frontmatterFields: selectedFields,
-    fixedFrontmatterProperties: normalizeFixedFrontmatterProperties(collectFixedPropertyRows())
+    fixedFrontmatterProperties: normalizeFixedFrontmatterProperties(collectFixedPropertyRows()),
+    aiSystemPrompt: String(elements.aiSystemPrompt?.value || "").trim(),
+    aiPresetPrompts: Array.isArray(savedAiPresetPrompts) ? savedAiPresetPrompts.slice(0, 12) : []
   };
 }
 
@@ -579,6 +588,7 @@ function normalizeApiKey(value) {
   return String(value || "").trim().replace(/^Bearer\s+/i, "").trim();
 }
 
+
 async function testConnection() {
   clearInputErrors();
   const payload = collectFormPayload();
@@ -672,6 +682,7 @@ function addAiProviderRow(item = {}) {
   row.className = "ai-provider-row";
   row.dataset.providerId = id;
   row.dataset.hasSavedKey = hasSavedKey ? "1" : "0";
+  row.dataset.currentPresetId = presetId;
   row.innerHTML = `
     <select class="ai-provider-preset" title="平台">
       ${AI_PRESETS.map((p) => `<option value="${escapeAttribute(p.id)}" ${p.id === presetId ? "selected" : ""}>${escapeAttribute(p.name)}</option>`).join("")}
@@ -697,14 +708,19 @@ function addAiProviderRow(item = {}) {
   `;
 
   row.querySelector(".ai-provider-preset").addEventListener("change", (e) => {
+    const previousPreset = AI_PRESETS.find((p) => p.id === row.dataset.currentPresetId) || null;
     const next = AI_PRESETS.find((p) => p.id === e.target.value);
     if (!next) return;
     const baseUrlInput = row.querySelector(".ai-provider-baseurl");
-    if (!baseUrlInput.value.trim()) {
+    const currentBaseUrl = baseUrlInput.value.trim();
+    if (!currentBaseUrl || (previousPreset && currentBaseUrl === previousPreset.baseUrl)) {
       baseUrlInput.value = next.baseUrl;
     }
     const apikeyInput = row.querySelector(".ai-provider-apikey");
-    apikeyInput.placeholder = next.requiresKey ? "API Key" : "API Key（可选）";
+    apikeyInput.placeholder = row.dataset.hasSavedKey === "1"
+      ? "API Key（已保存，留空不修改）"
+      : (next.requiresKey ? "API Key" : "API Key（可选）");
+    row.dataset.currentPresetId = next.id;
   });
 
   row.querySelector(".ai-provider-remove")?.addEventListener("click", async () => {
@@ -721,16 +737,23 @@ function addAiProviderRow(item = {}) {
   row.querySelector(".ai-provider-test")?.addEventListener("click", async () => {
     const statusNode = row.querySelector(".ai-provider-status");
     const baseUrl = row.querySelector(".ai-provider-baseurl").value.trim();
-    const apiKey = row.querySelector(".ai-provider-apikey").value.trim() || (hasSavedKey ? "__USE_SAVED__" : "");
+    const apiKey = row.querySelector(".ai-provider-apikey").value.trim();
+    const model = row.querySelector(".ai-provider-model").value.trim();
     if (!baseUrl) {
       showAiProviderStatus(statusNode, "请填写 baseUrl", true);
+      return;
+    }
+    if (!model) {
+      showAiProviderStatus(statusNode, "请填写模型名", true);
       return;
     }
     showAiProviderStatus(statusNode, "正在测试...");
     const resp = await sendRuntimeMessage({
       type: "ai-providers-test",
+      providerId: row.dataset.providerId || "",
       baseUrl,
-      apiKey: apiKey === "__USE_SAVED__" ? "" : apiKey
+      apiKey,
+      model
     });
     if (resp?.ok) {
       const modelsText = Array.isArray(resp.models) && resp.models.length
@@ -778,6 +801,9 @@ function collectAiProviders() {
 function validateAiProviders(items) {
   const seenIds = new Set();
   for (const item of items) {
+    if (!item.enabled && !item.baseUrl && !item.model && !item.apiKey && !item.hasSavedKey) {
+      continue;
+    }
     if (!item.baseUrl) {
       return { ok: false, message: "每个平台都需要填写 baseUrl" };
     }
@@ -789,10 +815,10 @@ function validateAiProviders(items) {
     } catch {
       return { ok: false, message: `baseUrl 格式不正确：${item.baseUrl}` };
     }
-    if (item.requiresKey && !item.apiKey && !item.hasSavedKey) {
+    if (item.enabled && item.requiresKey && !item.apiKey && !item.hasSavedKey) {
       return { ok: false, message: `平台「${item.name}」需要填写 API Key` };
     }
-    if (!item.model) {
+    if (item.enabled && !item.model) {
       return { ok: false, message: `平台「${item.name}」需要填写模型名` };
     }
     if (seenIds.has(item.id)) {

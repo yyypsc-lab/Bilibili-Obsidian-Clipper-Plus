@@ -27,18 +27,30 @@ body {
   justify-content: space-between;
 }
 
+.top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .top strong {
   font-size: 19px;
   font-weight: 600;
 }
 
 .ghost {
+  height: 28px;
+  min-width: 42px;
   border: 1px solid #cfcfcf;
   border-radius: 8px;
   background: #fafafa;
   color: #4a4a4a;
   font-size: 12px;
-  padding: 5px 10px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
   cursor: pointer;
 }
 

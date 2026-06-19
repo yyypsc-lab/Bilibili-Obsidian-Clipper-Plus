@@ -1,48 +1,50 @@
 import { buildSuggestedPrompts } from "./ai/context.js";
 
+const SELECTED_PROVIDER_KEY = "boc_ai_selected_provider";
+
 const els = {
   contextChip: document.getElementById("spContextChip"),
+  refreshBtn: document.getElementById("spRefreshBtn"),
   modelSelect: document.getElementById("spModelSelect"),
   settingsBtn: document.getElementById("spSettingsBtn"),
   newChatBtn: document.getElementById("spNewChatBtn"),
+  presetBtn: document.getElementById("spPresetBtn"),
+  presetPopover: document.getElementById("spPresetPopover"),
+  presetList: document.getElementById("spPresetList"),
+  presetInput: document.getElementById("spPresetInput"),
+  presetAddBtn: document.getElementById("spPresetAddBtn"),
   messages: document.getElementById("spMessages"),
-  suggestions: document.getElementById("spSuggestions"),
   input: document.getElementById("spInput"),
-  sendBtn: document.getElementById("spSendBtn")
+};
+
+const DEFAULT_AI_PREFS = {
+  aiSystemPrompt: "",
+  aiPresetPrompts: []
 };
 
 let contextData = null;
+let currentContextKey = "";
 let providers = [];
 let activePort = null;
 let activeAssistantNode = null;
 let activeUserPrompt = "";
-let chatHistory = []; // 多轮上下文：[{role, content}, ...]
+let chatHistory = [];
+let suggestionsNode = null;
+let aiPrefs = { ...DEFAULT_AI_PREFS };
 
 init().catch((err) => {
-  showCenterError(`初始化失败：${err?.message || err}`);
+  resetConversationView(`初始化失败：${escapeHtml(err?.message || err)}`);
 });
 
 async function init() {
   bindEvents();
   await loadProvidersAndPrefs();
-  await fetchContext();
-  await fetchComments();
-  renderSuggestions();
-  if (!contextData) {
-    showCenterError("当前页面不是 B 站视频页，无法读取视频信息。");
-  } else if (!providers.length) {
-    showCenterError(
-      '还没有配置 AI 平台，<a href="#" id="spOpenSettings">前往设置 →</a>'
-    );
-    document.getElementById("spOpenSettings")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      chrome.runtime.openOptionsPage();
-    });
-  }
+  await loadContextState();
+  renderInitialState();
+  autosizeInput();
 }
 
 function bindEvents() {
-  els.sendBtn.addEventListener("click", sendMessage);
   els.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -51,87 +53,46 @@ function bindEvents() {
   });
   els.input.addEventListener("input", autosizeInput);
   els.settingsBtn.addEventListener("click", () => chrome.runtime.openOptionsPage());
-  els.newChatBtn.addEventListener("click", restartChat);
+  els.newChatBtn.addEventListener("click", () => restartChat());
+  els.refreshBtn.addEventListener("click", () => refreshContextManually());
+  els.presetBtn.addEventListener("click", togglePresetPopover);
+  els.presetAddBtn.addEventListener("click", addPresetPrompt);
+  els.presetInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      addPresetPrompt();
+    }
+  });
+  els.modelSelect.addEventListener("change", () => {
+    if (els.modelSelect.value) {
+      localStorage.setItem(SELECTED_PROVIDER_KEY, els.modelSelect.value);
+    }
+  });
+  document.addEventListener("click", handleDocumentClick);
 }
 
 function autosizeInput() {
   els.input.style.height = "auto";
-  const next = Math.min(els.input.scrollHeight, 200);
-  els.input.style.height = `${next}px`;
-}
-
-async function fetchContext() {
-  const tab = await getActiveTab();
-  if (!tab) return;
-  try {
-    const resp = await chrome.tabs.sendMessage(tab.id, { type: "sidepanel-get-context" });
-    if (resp?.ok && resp.payload) {
-      contextData = resp.payload;
-      updateContextChip();
-    }
-  } catch {
-    // 非 B 站页或 content script 未注入
-    contextData = null;
-  }
-}
-
-async function fetchComments() {
-  if (!contextData) return;
-  const tab = await getActiveTab();
-  if (!tab) return;
-  try {
-    const resp = await chrome.tabs.sendMessage(tab.id, { type: "sidepanel-get-hot-comments" });
-    if (resp?.ok && Array.isArray(resp.comments) && contextData) {
-      contextData.hotComments = resp.comments;
-      updateContextChip();
-      renderSuggestions();
-    }
-  } catch {
-    // 静默降级
-  }
-}
-
-function updateContextChip() {
-  if (!contextData) {
-    els.contextChip.textContent = "无上下文";
-    return;
-  }
-  const title = contextData.title ? truncate(contextData.title, 26) : "未知视频";
-  const commentNote = contextData.hotComments?.length
-    ? ` · ${contextData.hotComments.length} 条评论`
-    : "";
-  els.contextChip.textContent = `${title}${commentNote}`;
-  els.contextChip.title = contextData.title || "";
-}
-
-function showCenterError(html) {
-  const node = document.createElement("div");
-  node.className = "sp-center-error";
-  node.innerHTML = html;
-  els.messages.appendChild(node);
-  scrollToBottom();
-}
-
-function renderSuggestions() {
-  if (!contextData || !els.suggestions) return;
-  const prompts = buildSuggestedPrompts(contextData);
-  els.suggestions.innerHTML = prompts
-    .map((p) => `<button type="button" class="sp-chip">${escapeHtml(p)}</button>`)
-    .join("");
-  els.suggestions.querySelectorAll(".sp-chip").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      els.input.value = btn.textContent;
-      sendMessage();
-    });
-  });
+  const next = Math.min(els.input.scrollHeight, 320);
+  els.input.style.height = `${Math.max(next, 94)}px`;
 }
 
 async function loadProvidersAndPrefs() {
-  const providersResp = await sendRuntimeMessage({ type: "ai-providers-list" });
+  const [providersResp, settingsResp] = await Promise.all([
+    sendRuntimeMessage({ type: "ai-providers-list" }),
+    sendRuntimeMessage({ type: "get-settings" }).catch(() => ({ ok: false }))
+  ]);
   providers = Array.isArray(providersResp?.providers)
     ? providersResp.providers.filter((p) => p.enabled)
     : [];
+  aiPrefs = {
+    aiSystemPrompt: String(settingsResp?.settings?.aiSystemPrompt || "").trim(),
+    aiPresetPrompts: Array.isArray(settingsResp?.settings?.aiPresetPrompts)
+      ? settingsResp.settings.aiPresetPrompts.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 12)
+      : []
+  };
   renderModelSelect();
+  renderPresetPrompts();
 }
 
 function renderModelSelect() {
@@ -140,44 +101,325 @@ function renderModelSelect() {
     els.modelSelect.disabled = true;
     return;
   }
+
   els.modelSelect.innerHTML = providers
     .map((p) => {
       const label = String(p.model || p.name || "").trim();
       return `<option value="${escapeHtml(p.id)}">${escapeHtml(label)}</option>`;
     })
     .join("");
+
+  const savedProviderId = localStorage.getItem(SELECTED_PROVIDER_KEY) || "";
+  const matchedProvider = providers.find((item) => item.id === savedProviderId) || providers[0];
+  els.modelSelect.value = matchedProvider?.id || "";
   els.modelSelect.disabled = false;
+}
+
+async function loadContextState({ forceRefresh = false, silent = false } = {}) {
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    contextData = null;
+    updateContextChip();
+    if (!silent) {
+      resetConversationView("找不到当前标签页。");
+    }
+    return false;
+  }
+
+  const resp = await sendRuntimeMessage({
+    type: "ai-sidepanel-get-state",
+    tabId: tab.id,
+    forceRefresh
+  }).catch((error) => ({ ok: false, error: error.message }));
+
+  if (!resp?.ok || !resp.payload) {
+    contextData = null;
+    currentContextKey = "";
+    updateContextChip();
+    if (!silent) {
+      resetConversationView(resp?.error || "请先打开一个 B 站视频页。");
+    }
+    return false;
+  }
+
+  applyContextPayload(resp.payload);
+  return true;
+}
+
+function applyContextPayload(payload) {
+  const nextContext = payload && typeof payload === "object" ? payload : null;
+  const nextKey = buildContextKey(nextContext);
+  const contextChanged = Boolean(currentContextKey && nextKey && nextKey !== currentContextKey);
+
+  contextData = nextContext;
+  currentContextKey = nextKey;
+  updateContextChip();
+
+  if (contextChanged) {
+    restartChat({ keepContext: true });
+  } else {
+    renderSuggestions();
+  }
+}
+
+function buildContextKey(payload) {
+  if (!payload) {
+    return "";
+  }
+  return [payload.bvid || "", payload.cid || "", payload.url || ""].join("|");
+}
+
+function updateContextChip() {
+  if (!contextData) {
+    els.contextChip.textContent = "无上下文";
+    els.contextChip.title = "";
+    return;
+  }
+
+  const shortTitle = contextData.title ? truncate(contextData.title, 8) : "未知视频";
+  els.contextChip.textContent = shortTitle;
+  els.contextChip.title = contextData.title || "";
+}
+
+function renderInitialState() {
+  if (!contextData) {
+    resetConversationView("当前页面不是 B 站视频页，无法读取视频信息。");
+    return;
+  }
+  if (!providers.length) {
+    resetConversationView('还没有配置 AI 平台，<a href="#" id="spOpenSettings">前往设置</a>');
+    document.getElementById("spOpenSettings")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+    return;
+  }
+  resetConversationView("");
+}
+
+function resetConversationView(stateHtml = "") {
+  els.messages.innerHTML = "";
+  if (stateHtml) {
+    const stateNode = document.createElement("div");
+    stateNode.className = "sp-center-error";
+    stateNode.innerHTML = stateHtml;
+    els.messages.appendChild(stateNode);
+  }
+  suggestionsNode = document.createElement("div");
+  suggestionsNode.className = "sp-suggestions";
+  suggestionsNode.id = "spSuggestions";
+  els.messages.appendChild(suggestionsNode);
+  renderSuggestions();
+  renderPresetPrompts();
+  scrollToBottom();
+}
+
+function renderSuggestions() {
+  if (!suggestionsNode) {
+    return;
+  }
+  if (!contextData || !providers.length || chatHistory.length) {
+    suggestionsNode.innerHTML = "";
+    return;
+  }
+  const prompts = buildSuggestedPrompts(contextData);
+  suggestionsNode.innerHTML = prompts
+    .map((prompt) => `<button type="button" class="sp-chip">${escapeHtml(prompt)}</button>`)
+    .join("");
+  suggestionsNode.querySelectorAll(".sp-chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      els.input.value = btn.textContent || "";
+      autosizeInput();
+      sendMessage();
+    });
+  });
+}
+
+function renderPresetPrompts() {
+  if (!els.presetList) {
+    return;
+  }
+  const prompts = Array.isArray(aiPrefs.aiPresetPrompts) ? aiPrefs.aiPresetPrompts : [];
+  if (!prompts.length) {
+    els.presetList.innerHTML = '<span class="sp-preset-empty">还没有预设提示词</span>';
+    return;
+  }
+  els.presetList.innerHTML = prompts
+    .map((prompt, index) => `
+      <span class="sp-preset-item">
+        <button type="button" class="sp-preset-chip" data-index="${index}" title="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>
+        <button type="button" class="sp-preset-remove" data-index="${index}" aria-label="删除预设提示词">×</button>
+      </span>
+    `)
+    .join("");
+  els.presetList.querySelectorAll(".sp-preset-chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = Number(btn.getAttribute("data-index") || -1);
+      insertPresetPrompt(prompts[index] || "");
+      hidePresetPopover();
+    });
+  });
+  els.presetList.querySelectorAll(".sp-preset-remove").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const index = Number(btn.getAttribute("data-index") || -1);
+      await removePresetPrompt(index);
+    });
+  });
+}
+
+function insertPresetPrompt(prompt) {
+  const text = String(prompt || "").trim();
+  if (!text) {
+    return;
+  }
+  const current = els.input.value.trim();
+  els.input.value = current ? `${current}\n${text}` : text;
+  els.input.focus();
+  autosizeInput();
+}
+
+function togglePresetPopover(event) {
+  event?.stopPropagation();
+  const willShow = els.presetPopover.hidden;
+  els.presetPopover.hidden = !willShow;
+  if (willShow) {
+    renderPresetPrompts();
+    els.presetInput.value = "";
+    els.presetInput.focus();
+  }
+}
+
+function hidePresetPopover() {
+  els.presetPopover.hidden = true;
+}
+
+function handleDocumentClick(event) {
+  if (els.presetPopover.hidden) {
+    return;
+  }
+  if (!(event.target instanceof Element)) {
+    hidePresetPopover();
+    return;
+  }
+  if (event.target.closest("#spPresetPopover") || event.target.closest("#spPresetBtn")) {
+    return;
+  }
+  hidePresetPopover();
+}
+
+async function addPresetPrompt() {
+  const text = String(els.presetInput.value || "").trim();
+  if (!text) {
+    return;
+  }
+  const nextPrompts = [...(aiPrefs.aiPresetPrompts || [])];
+  if (!nextPrompts.includes(text)) {
+    nextPrompts.push(text);
+  }
+  aiPrefs.aiPresetPrompts = nextPrompts.slice(0, 12);
+  await persistAiPresetPrompts();
+  els.presetInput.value = "";
+  renderPresetPrompts();
+}
+
+async function removePresetPrompt(index) {
+  if (index < 0) {
+    return;
+  }
+  aiPrefs.aiPresetPrompts = (aiPrefs.aiPresetPrompts || []).filter((_, itemIndex) => itemIndex !== index);
+  await persistAiPresetPrompts();
+  renderPresetPrompts();
+}
+
+async function persistAiPresetPrompts() {
+  const settingsResp = await sendRuntimeMessage({ type: "get-settings" }).catch(() => ({ ok: false }));
+  if (!settingsResp?.ok || !settingsResp.settings) {
+    return;
+  }
+  const nextSettings = {
+    ...settingsResp.settings,
+    aiPresetPrompts: (aiPrefs.aiPresetPrompts || []).slice(0, 12)
+  };
+  await sendRuntimeMessage({ type: "save-settings", settings: nextSettings }).catch(() => null);
+}
+
+async function refreshContextManually() {
+  if (els.refreshBtn.disabled) {
+    return;
+  }
+  setRefreshing(true);
+  try {
+    const ok = await loadContextState({ forceRefresh: true });
+    if (ok) {
+      if (!contextData || !providers.length || !chatHistory.length) {
+        renderInitialState();
+      } else {
+        renderSuggestions();
+      }
+    }
+  } finally {
+    setRefreshing(false);
+  }
+}
+
+function setRefreshing(isRefreshing) {
+  els.refreshBtn.disabled = isRefreshing;
+  els.refreshBtn.textContent = isRefreshing ? "…" : "↻";
+}
+
+async function ensureCurrentContextForSend() {
+  const previousKey = currentContextKey;
+  const ok = await loadContextState({ forceRefresh: false, silent: true });
+  if (!ok || !contextData) {
+    resetConversationView("请先打开一个 B 站视频页。");
+    return false;
+  }
+  if (previousKey && currentContextKey && previousKey !== currentContextKey) {
+    restartChat({ keepContext: true });
+  }
+  return true;
 }
 
 async function sendMessage() {
   const text = els.input.value.trim();
-  if (!text || els.sendBtn.disabled) return;
-  const providerId = els.modelSelect.value;
-  if (!providerId) {
-    showCenterError("请先在设置页配置 AI 平台。");
+  if (!text || activePort) {
     return;
   }
-  if (!contextData) {
-    showCenterError("请先打开一个 B 站视频页。");
+
+  const providerId = els.modelSelect.value;
+  if (!providerId) {
+    resetConversationView("请先在设置页配置并启用一个 AI 平台。");
+    return;
+  }
+
+  const hasContext = await ensureCurrentContextForSend();
+  if (!hasContext) {
     return;
   }
 
   if (activePort) {
-    try { activePort.disconnect(); } catch {}
+    try {
+      activePort.disconnect();
+    } catch {}
     activePort = null;
   }
-  els.suggestions?.remove();
+
+  suggestionsNode?.remove();
+  suggestionsNode = null;
+  removeCenteredState();
 
   appendUserMessage(text);
   els.input.value = "";
   autosizeInput();
-  els.sendBtn.disabled = true;
+  els.input.disabled = true;
   activeUserPrompt = text;
   activeAssistantNode = appendAssistantPlaceholder();
 
   activePort = chrome.runtime.connect({ name: "sidepanel-chat" });
   activePort.onMessage.addListener((msg) => {
-    if (!msg) return;
+    if (!msg) {
+      return;
+    }
     if (msg.type === "token") {
       appendToken(activeAssistantNode, msg.data);
     } else if (msg.type === "done") {
@@ -187,14 +429,17 @@ async function sendMessage() {
     }
   });
   activePort.onDisconnect.addListener(() => {
-    els.sendBtn.disabled = false;
+    els.input.disabled = false;
     activePort = null;
   });
 
   activePort.postMessage({
     action: "chat",
     providerId,
-    context: contextData,
+    context: {
+      ...contextData,
+      aiSystemPrompt: aiPrefs.aiSystemPrompt
+    },
     prompt: text,
     history: chatHistory
   });
@@ -221,78 +466,94 @@ function appendAssistantPlaceholder() {
 }
 
 function appendToken(node, token) {
-  if (!node) return;
+  if (!node) {
+    return;
+  }
   const raw = (node.dataset.raw || "") + String(token || "");
   node.dataset.raw = raw;
-  // 边流边渲染：已确认字符走 markdown 解析，未确认尾巴用纯文本 + 光标
-  // 简化：直接把 raw 全文做 markdown 渲染，再把光标挂在末尾
   node.innerHTML = renderMarkdown(raw) + '<span class="sp-msg-cursor"></span>';
   scrollToBottom();
 }
 
 function finalizeAssistant(node) {
-  if (!node) return;
+  if (!node) {
+    return;
+  }
   const raw = node.dataset.raw || "";
   node.innerHTML = renderMarkdown(raw);
-  // 把这一轮问答写入上下文，供下一轮拼接
-  if (activeUserPrompt) {
+  if (activeUserPrompt && raw) {
     chatHistory.push({ role: "user", content: activeUserPrompt });
     chatHistory.push({ role: "assistant", content: raw });
     activeUserPrompt = "";
   }
-  els.sendBtn.disabled = false;
+  if (activePort) {
+    try {
+      activePort.disconnect();
+    } catch {}
+    activePort = null;
+  }
+  els.input.disabled = false;
+  els.input.focus();
   scrollToBottom();
 }
 
 function showAssistantError(node, error) {
-  if (!node) return;
-  const cursor = node.querySelector(".sp-msg-cursor");
-  if (cursor) cursor.remove();
+  if (!node) {
+    return;
+  }
+  node.innerHTML = "";
   const err = document.createElement("div");
   err.className = "sp-msg-error";
   err.textContent = `错误：${error}`;
-  node.innerHTML = "";
   node.appendChild(err);
-  // 错误也写入上下文：用户问过 + 助手报错，避免下次又重发同样的失败请求
-  if (activeUserPrompt) {
-    chatHistory.push({ role: "user", content: activeUserPrompt });
-    chatHistory.push({ role: "assistant", content: `[错误] ${error}` });
-    activeUserPrompt = "";
+  activeUserPrompt = "";
+  if (activePort) {
+    try {
+      activePort.disconnect();
+    } catch {}
+    activePort = null;
   }
-  els.sendBtn.disabled = false;
+  els.input.disabled = false;
+  els.input.focus();
   scrollToBottom();
 }
 
-function restartChat() {
+function restartChat({ keepContext = false } = {}) {
   if (activePort) {
-    try { activePort.disconnect(); } catch {}
+    try {
+      activePort.disconnect();
+    } catch {}
     activePort = null;
   }
+
   activeAssistantNode = null;
   activeUserPrompt = "";
   chatHistory = [];
-  // 清空消息流，只保留建议 chip 区
-  els.messages.innerHTML = '<div class="sp-suggestions" id="spSuggestions"></div>';
-  els.suggestions = document.getElementById("spSuggestions");
-  renderSuggestions();
-  els.sendBtn.disabled = false;
+  if (!keepContext) {
+    currentContextKey = buildContextKey(contextData);
+  }
+  resetConversationView("");
+  els.input.disabled = false;
   els.input.value = "";
   autosizeInput();
 }
 
+function removeCenteredState() {
+  els.messages.querySelectorAll(".sp-center-error").forEach((node) => node.remove());
+}
+
 function renderMarkdown(text) {
-  // 小型 markdown 渲染：代码块、标题、列表、段落 + 行内 粗体/斜体/code/链接
-  // 1) 先 escape，并把代码块抽出来用占位符保留
-  let escaped = escapeHtml(text);
+  let escaped = escapeHtml(stripThinkBlocks(text));
   const codeBlocks = [];
   escaped = escaped.replace(/```([\s\S]*?)```/g, (_, code) => {
     codeBlocks.push(code);
-    return `BOC_CODE_${codeBlocks.length - 1}`;
+    return `\u0001BOC_CODE_${codeBlocks.length - 1}\u0001`;
   });
 
   const lines = escaped.split("\n");
   const out = [];
-  const listStack = []; // "ul" | "ol"
+  let listType = "";
+  let listStartNumber = 1;
   let paraBuf = [];
 
   const flushPara = () => {
@@ -301,63 +562,124 @@ function renderMarkdown(text) {
       paraBuf = [];
     }
   };
-  const closeLists = () => {
-    while (listStack.length) {
-      const t = listStack.pop();
-      out.push(t === "ul" ? "</ul>" : "</ol>");
+  const closeList = () => {
+    if (!listType) {
+      return;
     }
+    out.push(listType === "ul" ? "</ul>" : "</ol>");
+    listType = "";
+    listStartNumber = 1;
   };
+  const openList = (nextType, startNumber = 1) => {
+    if (listType === nextType && (nextType !== "ol" || listStartNumber === startNumber)) {
+      return;
+    }
+    closeList();
+    listType = nextType;
+    listStartNumber = nextType === "ol" ? startNumber : 1;
+    if (nextType === "ul") {
+      out.push("<ul>");
+      return;
+    }
+    out.push(startNumber > 1 ? `<ol start="${startNumber}">` : "<ol>");
+  };
+  const getNextListType = (startIndex) => {
+    for (let index = startIndex; index < lines.length; index += 1) {
+      const nextLine = lines[index].trim();
+      if (!nextLine) {
+        continue;
+      }
+      if (/^[-*+]\s+(.+)$/.test(nextLine)) {
+        return "ul";
+      }
+      if (/^\d+\.\s+(.+)$/.test(nextLine)) {
+        return "ol";
+      }
+      break;
+    }
+    return "";
+  };
+  const isTableSeparatorLine = (value) => /^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(value);
+  const isTableRowLine = (value) => /^\|.+\|$/.test(value);
+  const splitTableCells = (value) =>
+    value
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => renderInline(cell.trim()));
 
-  for (const rawLine of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
     const line = rawLine.trim();
 
-    // 代码块占位
-    const codeMatch = line.match(/^BOC_CODE_(\d+)$/);
+    const codeMatch = line.match(/^\u0001BOC_CODE_(\d+)\u0001$/);
     if (codeMatch) {
       flushPara();
-      closeLists();
+      closeList();
       out.push(`<pre><code>${codeBlocks[Number(codeMatch[1])]}</code></pre>`);
       continue;
     }
 
-    // 标题（# / ## / ###）
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
       flushPara();
-      closeLists();
-      const level = heading[1].length + 2; // # -> h3, ## -> h4, ### -> h5
+      closeList();
+      const level = heading[1].length + 2;
       out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
       continue;
     }
 
-    // 无序列表
+    if (
+      isTableRowLine(line) &&
+      index + 1 < lines.length &&
+      isTableSeparatorLine(lines[index + 1].trim())
+    ) {
+      flushPara();
+      closeList();
+      const headers = splitTableCells(line);
+      const bodyRows = [];
+      index += 2;
+      while (index < lines.length) {
+        const tableLine = lines[index].trim();
+        if (!isTableRowLine(tableLine)) {
+          index -= 1;
+          break;
+        }
+        bodyRows.push(splitTableCells(tableLine));
+        index += 1;
+      }
+      out.push(
+        `<table><thead><tr>${headers.map((cell) => `<th>${cell}</th>`).join("")}</tr></thead><tbody>${
+          bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")
+        }</tbody></table>`
+      );
+      continue;
+    }
+
     const ul = line.match(/^[-*+]\s+(.+)$/);
     if (ul) {
       flushPara();
-      if (listStack[listStack.length - 1] !== "ul") {
-        listStack.push("ul");
-        out.push("<ul>");
-      }
+      openList("ul");
       out.push(`<li>${renderInline(ul[1])}</li>`);
       continue;
     }
 
-    // 有序列表
-    const ol = line.match(/^\d+\.\s+(.+)$/);
+    const ol = line.match(/^(\d+)\.\s+(.+)$/);
     if (ol) {
       flushPara();
-      if (listStack[listStack.length - 1] !== "ol") {
-        listStack.push("ol");
-        out.push("<ol>");
-      }
-      out.push(`<li>${renderInline(ol[1])}</li>`);
+      const orderNumber = Number(ol[1]) || 1;
+      openList("ol", orderNumber);
+      out.push(`<li>${renderInline(ol[2])}</li>`);
       continue;
     }
 
-    // 空行：闭合段落和列表
     if (!line) {
       flushPara();
-      closeLists();
+      if (listType && getNextListType(index + 1) === listType) {
+        continue;
+      }
+      closeList();
       continue;
     }
 
@@ -365,8 +687,7 @@ function renderMarkdown(text) {
   }
 
   flushPara();
-  closeLists();
-
+  closeList();
   return out.join("");
 }
 
@@ -379,6 +700,13 @@ function renderInline(text) {
       const safeUrl = /^(https?:|mailto:|#)/i.test(u) ? u : "#";
       return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${t}</a>`;
     });
+}
+
+function stripThinkBlocks(text) {
+  return String(text || "")
+    .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+    .replace(/^\s*<\/?think\b[^>]*>\s*$/gim, "")
+    .trim();
 }
 
 function scrollToBottom() {
@@ -413,5 +741,5 @@ function escapeHtml(value) {
 
 function truncate(value, max) {
   const s = String(value || "");
-  return s.length > max ? s.slice(0, max) + "…" : s;
+  return s.length > max ? s.slice(0, max) + "..." : s;
 }
