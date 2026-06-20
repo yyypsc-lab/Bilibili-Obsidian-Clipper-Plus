@@ -42,6 +42,7 @@ let currentConversationMeta = null;
 let liveContextData = null;
 let liveContextKey = "";
 let contextNoticeTimer = 0;
+let shouldAutoScrollMessages = true;
 
 init().catch((err) => {
   resetConversationView(`初始化失败：${escapeHtml(err?.message || err)}`);
@@ -65,6 +66,9 @@ function bindEvents() {
     }
   });
   els.input.addEventListener("input", autosizeInput);
+  els.messages.addEventListener("scroll", () => {
+    shouldAutoScrollMessages = isMessagesNearBottom();
+  });
   els.settingsBtn.addEventListener("click", () => chrome.runtime.openOptionsPage());
   els.contextChip.addEventListener("click", () => {
     void openCurrentContextUrl();
@@ -203,7 +207,7 @@ function updateContextChip() {
     return;
   }
 
-  const shortTitle = contextData.title ? truncate(contextData.title, 11) : "未知视频";
+  const shortTitle = contextData.title ? truncate(contextData.title, 19) : "未知视频";
   els.contextChip.textContent = shortTitle;
   els.contextChip.title = contextData.url ? `${contextData.title || ""}\n点击跳转到这个视频` : contextData.title || "";
   els.contextChip.disabled = !String(contextData.url || "").trim();
@@ -255,7 +259,8 @@ function resetConversationView(stateHtml = "") {
   els.messages.appendChild(suggestionsNode);
   renderSuggestions();
   renderPresetPrompts();
-  scrollToBottom();
+  shouldAutoScrollMessages = true;
+  scrollToBottom(true);
 }
 
 function renderSuggestions() {
@@ -429,7 +434,8 @@ function applyConversation(conversation) {
     contextUrl: conversation.contextUrl,
     isVideoContext: conversation.isVideoContext !== false,
     pinnedContext: true,
-    contextRef: conversation.contextRef || null
+    contextRef: conversation.contextRef || null,
+    resolvedContext: null
   };
   chatHistory = Array.isArray(conversation.messages)
     ? conversation.messages.map((item) => ({ role: item.role, content: String(item.content || "") }))
@@ -437,6 +443,7 @@ function applyConversation(conversation) {
   if (liveContextData && conversation.contextKey && conversation.contextKey === liveContextKey) {
     contextData = { ...liveContextData };
     currentContextKey = liveContextKey;
+    currentConversationMeta.resolvedContext = { ...liveContextData };
   } else if (conversation.contextRef) {
     contextData = buildContextPlaceholder(conversation.contextRef);
     currentContextKey = conversation.contextKey || buildContextKey(contextData);
@@ -627,7 +634,8 @@ function renderConversationMessages() {
     renderAssistantMessage(node, String(message.content || ""));
     els.messages.appendChild(node);
   });
-  scrollToBottom();
+  shouldAutoScrollMessages = true;
+  scrollToBottom(true);
 }
 
 function buildConversationTitle(context) {
@@ -783,10 +791,23 @@ async function ensureCurrentContextForSend() {
 
 async function hydratePinnedConversationContext({ silent = false } = {}) {
   const targetKey = String(currentConversationMeta?.contextKey || "").trim();
+  const cachedResolvedContext = currentConversationMeta?.resolvedContext;
+  if (cachedResolvedContext && typeof cachedResolvedContext === "object") {
+    contextData = { ...cachedResolvedContext };
+    currentContextKey = targetKey || buildContextKey(contextData);
+    updateContextChip();
+    removeConversationContextNotice();
+    return true;
+  }
+
   if (targetKey && liveContextKey && targetKey === liveContextKey) {
     const ok = await loadContextState({ forceRefresh: false, silent: true });
     if (ok && contextData) {
       currentContextKey = targetKey;
+      currentConversationMeta = {
+        ...currentConversationMeta,
+        resolvedContext: { ...contextData }
+      };
       updateContextChip();
       removeConversationContextNotice();
       return true;
@@ -821,7 +842,8 @@ async function hydratePinnedConversationContext({ silent = false } = {}) {
     contextKey: currentContextKey,
     contextTitle: String(contextData.title || currentConversationMeta?.contextTitle || "").trim(),
     contextUrl: String(contextData.url || currentConversationMeta?.contextUrl || "").trim(),
-    contextRef: buildConversationContextRef(contextData)
+    contextRef: buildConversationContextRef(contextData),
+    resolvedContext: { ...contextData }
   };
   updateContextChip();
   removeConversationContextNotice();
@@ -914,7 +936,8 @@ function appendUserMessage(text, shouldScroll = true) {
   node.textContent = text;
   els.messages.appendChild(node);
   if (shouldScroll) {
-    scrollToBottom();
+    shouldAutoScrollMessages = true;
+    scrollToBottom(true);
   }
 }
 
@@ -926,7 +949,8 @@ function appendAssistantPlaceholder() {
   cursor.className = "sp-msg-cursor";
   node.appendChild(cursor);
   els.messages.appendChild(node);
-  scrollToBottom();
+  shouldAutoScrollMessages = true;
+  scrollToBottom(true);
   return node;
 }
 
@@ -1273,6 +1297,11 @@ function removeConversationContextNotice() {
   els.messages.querySelectorAll(".sp-context-notice").forEach((node) => node.remove());
 }
 
+function isMessagesNearBottom(threshold = 56) {
+  const { scrollTop, scrollHeight, clientHeight } = els.messages;
+  return scrollHeight - (scrollTop + clientHeight) <= threshold;
+}
+
 function renderMarkdown(text) {
   let escaped = escapeHtml(stripThinkBlocks(text));
   const codeBlocks = [];
@@ -1442,7 +1471,10 @@ function stripThinkBlocks(text) {
     .trim();
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
+  if (!force && !shouldAutoScrollMessages) {
+    return;
+  }
   els.messages.scrollTop = els.messages.scrollHeight;
 }
 
