@@ -416,11 +416,14 @@ function renderHistoryList() {
     .map((conversation) => {
       const isActive = conversation.id === currentConversationId;
       const metaText = formatConversationTimestamp(conversation.createdAt);
-      const titleText = truncateConversationTitle(conversation.title, 22);
+      const titleDisplay = buildConversationTitleDisplay(conversation.title, 30);
       return `
         <div class="sp-history-item ${isActive ? "is-active" : ""}" data-id="${escapeHtml(conversation.id)}">
           <button type="button" class="sp-history-open" data-id="${escapeHtml(conversation.id)}">
-            <span class="sp-history-title" title="${escapeHtml(conversation.title)}">${escapeHtml(titleText)}</span>
+            <span class="sp-history-title" title="${escapeHtml(conversation.title)}">
+              <span class="sp-history-title-main">${escapeHtml(titleDisplay.main)}</span>
+              ${titleDisplay.suffix ? `<span class="sp-history-title-suffix">${escapeHtml(titleDisplay.suffix)}</span>` : ""}
+            </span>
             <span class="sp-history-meta" title="${escapeHtml(metaText)}">${escapeHtml(metaText)}</span>
           </button>
           <button type="button" class="sp-history-remove" data-id="${escapeHtml(conversation.id)}" aria-label="删除历史对话">×</button>
@@ -450,6 +453,7 @@ async function loadSavedConversations() {
   const data = await chrome.storage.local.get([CONVERSATIONS_STORAGE_KEY]).catch(() => ({}));
   savedConversations = normalizeConversations(data?.[CONVERSATIONS_STORAGE_KEY]);
   renderHistoryList();
+  void hydrateConversationPageMetadata();
 }
 
 function normalizeConversations(value) {
@@ -472,7 +476,7 @@ function normalizeConversations(value) {
       const contextUrl = String(item?.contextUrl || "").trim();
       return {
         id,
-        title: normalizeConversationTitle(item?.title, contextTitle),
+        title: normalizeConversationTitle(item?.title, contextTitle, contextRef, contextUrl),
         contextKey: resolveConversationStorageKey(item?.contextKey, contextRef, contextUrl),
         contextTitle,
         contextUrl,
@@ -498,6 +502,95 @@ function resolveConversationStorageKey(rawKey, contextRef, contextUrl = "") {
     return normalizedUrlKey;
   }
   return String(rawKey || "").trim();
+}
+
+async function hydrateConversationPageMetadata() {
+  const candidates = savedConversations
+    .filter((item) => needsConversationPageHydration(item))
+    .slice(0, 12);
+  if (!candidates.length) {
+    return;
+  }
+
+  let changed = false;
+  for (const conversation of candidates) {
+    const contextRef = conversation.contextRef || null;
+    if (!contextRef?.bvid || !contextRef?.cid) {
+      continue;
+    }
+    const response = await sendRuntimeMessage({
+      type: "ai-sidepanel-resolve-page-ref",
+      contextRef
+    }).catch(() => null);
+    if (!response?.ok || !response.payload) {
+      continue;
+    }
+
+    const payload = response.payload;
+    const nextPageIndex = Number(payload.pageIndex) > 0 ? Number(payload.pageIndex) : 1;
+    const nextUrl = String(payload.url || conversation.contextUrl || contextRef.url || "").trim();
+    const nextContextRef = {
+      ...contextRef,
+      url: nextUrl,
+      cid: String(payload.cid || contextRef.cid || "").trim(),
+      pageIndex: nextPageIndex,
+      pageTitle: String(payload.pageTitle || contextRef.pageTitle || "").trim()
+    };
+    const nextTitle = normalizeConversationTitle(conversation.title, conversation.contextTitle, nextContextRef, nextUrl);
+    const nextContextKey = resolveConversationStorageKey(conversation.contextKey, nextContextRef, nextUrl);
+    if (
+      nextTitle === conversation.title &&
+      nextUrl === conversation.contextUrl &&
+      nextContextKey === conversation.contextKey &&
+      Number(conversation.contextRef?.pageIndex || 1) === nextPageIndex
+    ) {
+      continue;
+    }
+
+    conversation.title = nextTitle;
+    conversation.contextUrl = nextUrl;
+    conversation.contextKey = nextContextKey;
+    conversation.contextRef = nextContextRef;
+    changed = true;
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  if (currentConversationId) {
+    const activeConversation = savedConversations.find((item) => item.id === currentConversationId);
+    if (activeConversation) {
+      currentConversationMeta = {
+        ...currentConversationMeta,
+        title: activeConversation.title,
+        contextKey: activeConversation.contextKey,
+        contextUrl: activeConversation.contextUrl,
+        contextRef: activeConversation.contextRef
+      };
+    }
+  }
+  renderHistoryList();
+  updateContextChip();
+  await saveConversations();
+}
+
+function needsConversationPageHydration(conversation) {
+  if (!conversation?.isVideoContext) {
+    return false;
+  }
+  if (/-P\d+$/i.test(String(conversation.title || "").trim())) {
+    return false;
+  }
+  const pageIndex = Number(conversation.contextRef?.pageIndex || 0) || 0;
+  if (pageIndex > 1) {
+    return true;
+  }
+  const urlPageIndex = extractPageIndexFromContextUrl(conversation.contextUrl || conversation.contextRef?.url || "");
+  if (urlPageIndex > 1) {
+    return true;
+  }
+  return Boolean(conversation.contextRef?.bvid && conversation.contextRef?.cid);
 }
 
 async function saveConversations() {
@@ -795,7 +888,8 @@ function renderConversationMessages() {
 
 function buildConversationTitle(context) {
   const rawTitle = String(context?.title || "当前页面").trim() || "当前页面";
-  return extractConversationBaseTitle(rawTitle);
+  const baseTitle = extractConversationBaseTitle(rawTitle);
+  return appendConversationPageSuffix(baseTitle, context);
 }
 
 function buildConversationContextRef(context) {
@@ -810,6 +904,9 @@ function buildConversationContextRef(context) {
     bvid: String(context.bvid || "").trim(),
     cid: String(context.cid || "").trim(),
     aid: String(context.aid || "").trim(),
+    pageIndex: Number(context.pageIndex) > 0 ? Number(context.pageIndex) : 1,
+    pageCount: Number(context.pageCount) > 0 ? Number(context.pageCount) : 0,
+    pageTitle: String(context.pageTitle || "").trim(),
     subtitleLang: String(context.subtitleLang || "").trim(),
     selectedSubtitleId: String(context.selectedSubtitleId || "").trim(),
     selectedSubtitleUrl: String(context.selectedSubtitleUrl || "").trim(),
@@ -833,6 +930,9 @@ function buildContextPlaceholder(ref) {
     bvid: String(ref.bvid || "").trim(),
     cid: String(ref.cid || "").trim(),
     aid: String(ref.aid || "").trim(),
+    pageIndex: Number(ref.pageIndex) > 0 ? Number(ref.pageIndex) : 1,
+    pageCount: Number(ref.pageCount) > 0 ? Number(ref.pageCount) : 0,
+    pageTitle: String(ref.pageTitle || "").trim(),
     subtitleLang: String(ref.subtitleLang || "").trim(),
     selectedSubtitleId: String(ref.selectedSubtitleId || "").trim(),
     selectedSubtitleUrl: String(ref.selectedSubtitleUrl || "").trim(),
@@ -842,10 +942,10 @@ function buildContextPlaceholder(ref) {
   };
 }
 
-function normalizeConversationTitle(title, contextTitle = "") {
+function normalizeConversationTitle(title, contextTitle = "", contextRef = null, contextUrl = "") {
   const preferredTitle = String(contextTitle || "").trim() || String(title || "").trim();
   const baseTitle = extractConversationBaseTitle(preferredTitle);
-  return baseTitle || "历史对话";
+  return appendConversationPageSuffix(baseTitle || "历史对话", contextRef || { url: contextUrl });
 }
 
 function generateConversationId() {
@@ -857,16 +957,67 @@ function extractConversationBaseTitle(title) {
   if (!raw) {
     return "当前页面";
   }
-  const parts = raw
+  const normalizedRaw = raw.replace(/-P\d+$/i, "").trim();
+  const parts = normalizedRaw
     .split(/\s+[|｜]\s+|\s+-\s+|\s+[—–]\s+|\s+[·•]\s+|\r?\n+/)
     .map((item) => item.trim())
     .filter(Boolean);
-  return parts[0] || raw;
+  return parts[0] || normalizedRaw;
 }
 
 function truncateConversationTitle(title, maxChars = 22) {
   const value = String(title || "").trim();
+  const match = value.match(/^(.*?)(-P\d+)$/i);
+  if (match) {
+    const baseTitle = String(match[1] || "").trim();
+    const suffix = String(match[2] || "").trim();
+    const truncatedBase = baseTitle.length > maxChars ? `${baseTitle.slice(0, maxChars)}...` : baseTitle;
+    return `${truncatedBase}${suffix}`;
+  }
   return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+
+function buildConversationTitleDisplay(title, maxChars = 22) {
+  const value = String(title || "").trim();
+  const match = value.match(/^(.*?)(-P\d+)$/i);
+  if (!match) {
+    return {
+      main: value.length > maxChars ? `${value.slice(0, maxChars)}...` : value,
+      suffix: ""
+    };
+  }
+
+  const suffix = String(match[2] || "").trim();
+  const baseTitle = String(match[1] || "").trim();
+  const reservedChars = Math.max(suffix.length + 3, 6);
+  const availableChars = Math.max(maxChars - reservedChars, 8);
+  return {
+    main: baseTitle.length > availableChars ? `${baseTitle.slice(0, availableChars)}...` : baseTitle,
+    suffix
+  };
+}
+
+function appendConversationPageSuffix(title, context) {
+  const baseTitle = String(title || "").trim() || "历史对话";
+  const existingSuffixMatch = baseTitle.match(/-P\d+$/i);
+  const cleanTitle = existingSuffixMatch ? baseTitle.replace(/-P\d+$/i, "").trim() : baseTitle;
+  const pageSuffix = extractConversationPageSuffix(context);
+  return pageSuffix ? `${cleanTitle}${pageSuffix}` : cleanTitle;
+}
+
+function extractConversationPageSuffix(context) {
+  const pageIndex = Number(context?.pageIndex || context?.page || 0) || extractPageIndexFromContextUrl(context?.url);
+  return pageIndex > 1 ? `-P${pageIndex}` : "";
+}
+
+function extractPageIndexFromContextUrl(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    const page = Number(parsed.searchParams.get("p") || "1");
+    return Number.isFinite(page) && page > 0 ? page : 1;
+  } catch {
+    return 1;
+  }
 }
 
 function formatConversationTimestamp(value) {

@@ -468,13 +468,13 @@ body {
 .sp-history-popover {
   position: absolute;
   left: 12px;
-  width: min(286px, calc(100% - 24px));
+  width: min(328px, calc(100% - 24px));
   bottom: 124px;
   z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 280px;
+  max-height: 430px;
   padding: 10px;
   border: 1px solid #e7ebf0;
   border-radius: 14px;
@@ -540,11 +540,27 @@ body {
 }
 
 .sp-history-title {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
   font-size: 11px;
   line-height: 1.35;
+}
+
+.sp-history-title-main {
+  min-width: 0;
+  flex: 1 1 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sp-history-title-suffix {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: #475569;
+  font-size: 10px;
 }
 
 .sp-history-meta {

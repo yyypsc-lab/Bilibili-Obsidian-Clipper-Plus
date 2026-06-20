@@ -251,6 +251,9 @@ function normalizeAiContextRef(ref) {
     bvid: String(value.bvid || extractBvidFromUrl(value.url) || "").trim(),
     cid: String(value.cid || "").trim(),
     aid: String(value.aid || "").trim(),
+    pageIndex: Number(value.pageIndex) > 0 ? Number(value.pageIndex) : 1,
+    pageCount: Number(value.pageCount) > 0 ? Number(value.pageCount) : 0,
+    pageTitle: String(value.pageTitle || "").trim(),
     subtitleLang: String(value.subtitleLang || "").trim(),
     selectedSubtitleId: String(value.selectedSubtitleId || "").trim(),
     selectedSubtitleUrl: String(value.selectedSubtitleUrl || "").trim(),
@@ -713,6 +716,7 @@ async function resolveAiSidepanelContext(contextRef) {
   const title = String(videoMeta.title || ref.title || "").trim();
   const author = String(videoMeta.author || ref.author || "").trim();
   const uploadDate = String(videoMeta.uploadDate || ref.uploadDate || "").trim();
+  const pageTitle = String(page?.part || ref.pageTitle || "").trim();
   const url = buildCanonicalVideoUrl(ref.bvid, pageIndex) || ref.url;
   const contextMeta = {
     title,
@@ -728,6 +732,8 @@ async function resolveAiSidepanelContext(contextRef) {
     bvid: ref.bvid,
     cid,
     aid,
+    pageIndex,
+    pageTitle,
     subtitleLang: String(selectedTrack.lanDoc || selectedTrack.lan || "").trim(),
     selectedSubtitleId: String(selectedTrack.id || "").trim(),
     selectedSubtitleUrl: String(selectedTrack.subtitleUrl || "").trim(),
@@ -740,6 +746,30 @@ async function resolveAiSidepanelContext(contextRef) {
     })),
     hotComments,
     isVideoContext: true
+  };
+}
+
+async function resolveAiSidepanelPageRef(contextRef) {
+  const ref = normalizeAiContextRef(contextRef);
+  if (!ref.isVideoContext || !ref.bvid) {
+    return {
+      url: ref.url,
+      bvid: ref.bvid,
+      cid: ref.cid,
+      pageIndex: Number(ref.pageIndex) > 0 ? Number(ref.pageIndex) : 1,
+      pageTitle: ref.pageTitle
+    };
+  }
+
+  const videoMeta = await fetchBiliVideoMetaByBvid(ref.bvid);
+  const page = pickPageForAiContext(videoMeta.pages, ref);
+  const pageIndex = Number(page?.page || ref.pageIndex || extractPageIndexFromUrl(ref.url) || 1) || 1;
+  return {
+    url: buildCanonicalVideoUrl(ref.bvid, pageIndex) || ref.url,
+    bvid: ref.bvid,
+    cid: String(page?.cid || ref.cid || "").trim(),
+    pageIndex,
+    pageTitle: String(page?.part || ref.pageTitle || "").trim()
   };
 }
 
@@ -1010,6 +1040,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "ai-sidepanel-resolve-context") {
     resolveAiSidepanelContext(message.contextRef || {})
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-sidepanel-resolve-page-ref") {
+    resolveAiSidepanelPageRef(message.contextRef || {})
       .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
