@@ -41,8 +41,11 @@ let currentConversationId = "";
 let currentConversationMeta = null;
 let liveContextData = null;
 let liveContextKey = "";
+let liveTabUrl = "";
 let contextNoticeTimer = 0;
 let shouldAutoScrollMessages = true;
+let liveContextSyncTimer = 0;
+let liveContextSyncForceRefresh = false;
 
 init().catch((err) => {
   resetConversationView(`初始化失败：${escapeHtml(err?.message || err)}`);
@@ -92,6 +95,26 @@ function bindEvents() {
     }
   });
   document.addEventListener("click", handleDocumentClick);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      scheduleLiveContextSync(true);
+    }
+  });
+  window.addEventListener("focus", () => {
+    scheduleLiveContextSync(true);
+  });
+  chrome.tabs.onActivated.addListener(() => {
+    scheduleLiveContextSync(true);
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!tab?.active) {
+      return;
+    }
+    if (!changeInfo.url && changeInfo.status !== "complete") {
+      return;
+    }
+    scheduleLiveContextSync(Boolean(changeInfo.url));
+  });
 }
 
 function autosizeInput() {
@@ -139,11 +162,18 @@ function renderModelSelect() {
 }
 
 async function loadContextState({ forceRefresh = false, silent = false } = {}) {
+  const hasPinnedConversation = currentConversationMeta?.pinnedContext === true;
   const tab = await getActiveTab();
   if (!tab?.id) {
-    contextData = null;
+    liveContextData = null;
+    liveContextKey = "";
+    liveTabUrl = "";
+    if (!hasPinnedConversation) {
+      contextData = null;
+      currentContextKey = "";
+    }
     updateContextChip();
-    if (!silent) {
+    if (!silent && !hasPinnedConversation) {
       resetConversationView("找不到当前标签页。");
     }
     return false;
@@ -154,12 +184,17 @@ async function loadContextState({ forceRefresh = false, silent = false } = {}) {
     tabId: tab.id,
     forceRefresh
   }).catch((error) => ({ ok: false, error: error.message }));
+  liveTabUrl = String(tab.url || "").trim();
 
   if (!resp?.ok || !resp.payload) {
-    contextData = null;
-    currentContextKey = "";
+    liveContextData = null;
+    liveContextKey = "";
+    if (!hasPinnedConversation) {
+      contextData = null;
+      currentContextKey = "";
+    }
     updateContextChip();
-    if (!silent) {
+    if (!silent && !hasPinnedConversation) {
       resetConversationView(resp?.error || "当前页面上下文读取失败。");
     }
     return false;
@@ -167,6 +202,11 @@ async function loadContextState({ forceRefresh = false, silent = false } = {}) {
 
   liveContextData = resp.payload;
   liveContextKey = buildContextKey(resp.payload);
+  if (hasPinnedConversation) {
+    updateContextChip();
+    return true;
+  }
+
   const contextChanged = applyContextPayload(resp.payload);
   if (contextChanged) {
     await restoreLatestConversationForCurrentContext();
@@ -196,7 +236,28 @@ function buildContextKey(payload) {
   if (!payload) {
     return "";
   }
-  return [payload.bvid || "", payload.cid || "", payload.url || ""].join("|");
+  const bvid = String(payload.bvid || "").trim();
+  const cid = String(payload.cid || "").trim();
+  const aid = String(payload.aid || "").trim();
+  if (bvid || cid || aid) {
+    return `video:${bvid}|${cid || aid}`;
+  }
+  const normalizedUrl = normalizeContextUrlForKey(payload.url);
+  return normalizedUrl ? `url:${normalizedUrl}` : "";
+}
+
+function normalizeContextUrlForKey(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    parsed.hash = "";
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return text;
+  }
 }
 
 function updateContextChip() {
@@ -204,13 +265,32 @@ function updateContextChip() {
     els.contextChip.textContent = "无上下文";
     els.contextChip.title = "";
     els.contextChip.disabled = true;
+    els.contextChip.classList.remove("is-mismatch");
     return;
   }
 
   const shortTitle = contextData.title ? truncate(contextData.title, 19) : "未知视频";
   els.contextChip.textContent = shortTitle;
-  els.contextChip.title = contextData.url ? `${contextData.title || ""}\n点击跳转到这个视频` : contextData.title || "";
+  const mismatch = isBoundConversationMismatched();
+  els.contextChip.classList.toggle("is-mismatch", mismatch);
+  els.contextChip.title = contextData.url
+    ? `${contextData.title || ""}${mismatch ? "\n当前页不是这个对话绑定的视频" : ""}\n点击跳转目标视频，或开启新对话`
+    : contextData.title || "";
   els.contextChip.disabled = !String(contextData.url || "").trim();
+}
+
+function isBoundConversationMismatched() {
+  if (currentConversationMeta?.pinnedContext !== true) {
+    return false;
+  }
+  const targetUrl = String(currentConversationMeta?.contextUrl || contextData?.url || "").trim();
+  if (!targetUrl) {
+    return false;
+  }
+  if (!liveTabUrl) {
+    return true;
+  }
+  return !doesTabMatchContextUrl(liveTabUrl, targetUrl);
 }
 
 async function openCurrentContextUrl() {
@@ -222,7 +302,14 @@ async function openCurrentContextUrl() {
   if (!tab?.id) {
     return;
   }
-  await chrome.tabs.update(tab.id, { url: targetUrl }).catch(() => null);
+  try {
+    const sameVideo = doesTabMatchContextUrl(tab.url || "", targetUrl);
+    if (!sameVideo) {
+      await chrome.tabs.update(tab.id, { url: targetUrl });
+      await waitForTabComplete(tab.id);
+    }
+    await loadContextState({ forceRefresh: true, silent: true });
+  } catch {}
 }
 
 function renderInitialState() {
@@ -381,22 +468,36 @@ function normalizeConversations(value) {
         return null;
       }
       const contextTitle = String(item?.contextTitle || "").trim();
+      const contextRef = normalizeConversationContextRef(item?.contextRef || item?.contextSnapshot || item);
+      const contextUrl = String(item?.contextUrl || "").trim();
       return {
         id,
         title: normalizeConversationTitle(item?.title, contextTitle),
-        contextKey: String(item?.contextKey || "").trim(),
+        contextKey: resolveConversationStorageKey(item?.contextKey, contextRef, contextUrl),
         contextTitle,
-        contextUrl: String(item?.contextUrl || "").trim(),
+        contextUrl,
         isVideoContext: item?.isVideoContext !== false,
         createdAt: Number(item?.createdAt) || Date.now(),
         updatedAt: Number(item?.updatedAt) || Date.now(),
-        contextRef: normalizeConversationContextRef(item?.contextRef || item?.contextSnapshot || item),
+        contextRef,
         messages
       };
     })
     .filter(Boolean)
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
     .slice(0, MAX_SAVED_CONVERSATIONS);
+}
+
+function resolveConversationStorageKey(rawKey, contextRef, contextUrl = "") {
+  const normalizedRefKey = buildContextKey(contextRef);
+  if (normalizedRefKey) {
+    return normalizedRefKey;
+  }
+  const normalizedUrlKey = buildContextKey({ url: contextUrl });
+  if (normalizedUrlKey) {
+    return normalizedUrlKey;
+  }
+  return String(rawKey || "").trim();
 }
 
 async function saveConversations() {
@@ -409,7 +510,8 @@ async function saveConversations() {
 
 async function restoreLatestConversationForCurrentContext() {
   const targetContextKey = liveContextKey || currentContextKey;
-  const latest = savedConversations.find((item) => item.contextKey && item.contextKey === targetContextKey);
+  const currentRef = liveContextData || contextData;
+  const latest = savedConversations.find((item) => doesConversationMatchCurrentContext(item, currentRef, targetContextKey));
   if (!latest) {
     currentConversationId = "";
     currentConversationMeta = null;
@@ -418,6 +520,28 @@ async function restoreLatestConversationForCurrentContext() {
   }
   applyConversation(latest);
   return true;
+}
+
+function doesConversationMatchCurrentContext(conversation, currentRef, targetContextKey = "") {
+  if (!conversation) {
+    return false;
+  }
+  const normalizedConversationKey = resolveConversationStorageKey(
+    conversation.contextKey,
+    conversation.contextRef,
+    conversation.contextUrl
+  );
+  const normalizedTargetKey = String(targetContextKey || buildContextKey(currentRef)).trim();
+  if (normalizedConversationKey && normalizedTargetKey && normalizedConversationKey === normalizedTargetKey) {
+    return true;
+  }
+
+  const conversationUrl = String(conversation.contextUrl || conversation.contextRef?.url || "").trim();
+  const currentUrl = String(currentRef?.url || "").trim();
+  if (conversationUrl && currentUrl) {
+    return doesTabMatchContextUrl(currentUrl, conversationUrl);
+  }
+  return false;
 }
 
 function applyConversation(conversation) {
@@ -475,6 +599,11 @@ async function deleteConversation(id) {
   currentConversationId = "";
   currentConversationMeta = null;
   chatHistory = [];
+  if (liveContextData) {
+    contextData = { ...liveContextData };
+    currentContextKey = liveContextKey || buildContextKey(liveContextData);
+    updateContextChip();
+  }
   renderInitialState();
 }
 
@@ -536,6 +665,32 @@ function handleDocumentClick(event) {
   }
   hidePresetPopover();
   hideHistoryPopover();
+}
+
+function scheduleLiveContextSync(forceRefresh = false) {
+  liveContextSyncForceRefresh = liveContextSyncForceRefresh || forceRefresh;
+  if (liveContextSyncTimer) {
+    window.clearTimeout(liveContextSyncTimer);
+  }
+  liveContextSyncTimer = window.setTimeout(() => {
+    const nextForceRefresh = liveContextSyncForceRefresh;
+    liveContextSyncTimer = 0;
+    liveContextSyncForceRefresh = false;
+    void syncLiveContextState(nextForceRefresh);
+  }, forceRefresh ? 120 : 220);
+}
+
+async function syncLiveContextState(forceRefresh = false) {
+  const ok = await loadContextState({ forceRefresh, silent: true }).catch(() => false);
+  if (currentConversationMeta?.pinnedContext || activePort || activeUserPrompt) {
+    updateContextChip();
+    return;
+  }
+  if (!ok || !contextData || !providers.length || !chatHistory.length) {
+    renderInitialState();
+    return;
+  }
+  renderSuggestions();
 }
 
 async function addPresetPrompt() {
@@ -739,8 +894,9 @@ async function persistCurrentConversation() {
       contextTitle: String(contextData.title || "").trim(),
       contextUrl: String(contextData.url || "").trim(),
       isVideoContext: contextData.isVideoContext !== false,
-      pinnedContext: Boolean(currentConversationMeta?.pinnedContext),
-      contextRef: buildConversationContextRef(contextData)
+      pinnedContext: true,
+      contextRef: buildConversationContextRef(contextData),
+      resolvedContext: { ...contextData }
     };
   }
   const nextConversation = {
@@ -767,24 +923,22 @@ async function persistCurrentConversation() {
     contextTitle: nextConversation.contextTitle,
     contextUrl: nextConversation.contextUrl,
     isVideoContext: nextConversation.isVideoContext,
-    pinnedContext: currentConversationMeta?.pinnedContext === true,
-    contextRef: nextConversation.contextRef
+    pinnedContext: true,
+    contextRef: nextConversation.contextRef,
+    resolvedContext: currentConversationMeta?.resolvedContext ? { ...currentConversationMeta.resolvedContext } : { ...contextData }
   };
   await saveConversations();
 }
 
 async function ensureCurrentContextForSend() {
   if (currentConversationMeta?.pinnedContext) {
+    await loadContextState({ forceRefresh: false, silent: true }).catch(() => null);
     return hydratePinnedConversationContext();
   }
-  const previousKey = currentContextKey;
   const ok = await loadContextState({ forceRefresh: false, silent: true });
   if (!ok || !contextData) {
     resetConversationView("当前页面上下文读取失败。");
     return false;
-  }
-  if (previousKey && currentContextKey && previousKey !== currentContextKey) {
-    restartChat({ keepContext: true });
   }
   return true;
 }
@@ -1253,6 +1407,7 @@ function restartChat({ keepContext = false } = {}) {
   if (!keepContext) {
     currentContextKey = buildContextKey(contextData);
   }
+  updateContextChip();
   resetConversationView("");
   els.input.disabled = false;
   els.input.value = "";
