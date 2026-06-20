@@ -479,6 +479,8 @@ function bindRuntimeEvents() {
           subtitleBody: body,
           subtitleMarkdown,
           subtitleLang: state.selectedSubtitleLang || "",
+          selectedSubtitleId: state.selectedSubtitleId || "",
+          selectedSubtitleUrl: state.selectedSubtitleUrl || "",
           subtitleOptions: state.subtitles || [],
           hotComments: []
         }
@@ -523,6 +525,29 @@ function bindRuntimeEvents() {
           sendResponse({ ok: true, comments: [], note: String(error?.message || error) });
         });
       return true;
+    }
+
+    if (message.type === "sidepanel-seek-video-time") {
+      const seconds = Number(message.seconds);
+      const video = getRuntimeVideoElement();
+      if (!video) {
+        sendResponse({ ok: false, error: "当前页面没有找到可联动的视频播放器。" });
+        return false;
+      }
+      const nextTime = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+      const wasPaused = Boolean(video.paused);
+      video.currentTime = nextTime;
+      if (!wasPaused) {
+        video.play().catch(() => {});
+      }
+      if (state.readingViewOpen) {
+        state.readingManualScrollPauseUntil = 0;
+        state.readingNextScrollBehavior = "auto";
+        updateReaderFollowState();
+        syncReadingViewPlayback(true);
+      }
+      sendResponse({ ok: true, currentTime: nextTime });
+      return false;
     }
 
     return false;

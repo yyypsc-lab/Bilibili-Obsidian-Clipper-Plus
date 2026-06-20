@@ -241,6 +241,508 @@ async function getAiSidepanelState(tabId, { forceRefresh = false } = {}) {
   };
 }
 
+function normalizeAiContextRef(ref) {
+  const value = ref && typeof ref === "object" ? ref : {};
+  return {
+    title: String(value.title || "").trim(),
+    url: String(value.url || "").trim(),
+    author: String(value.author || "").trim(),
+    uploadDate: String(value.uploadDate || "").trim(),
+    bvid: String(value.bvid || extractBvidFromUrl(value.url) || "").trim(),
+    cid: String(value.cid || "").trim(),
+    aid: String(value.aid || "").trim(),
+    subtitleLang: String(value.subtitleLang || "").trim(),
+    selectedSubtitleId: String(value.selectedSubtitleId || "").trim(),
+    selectedSubtitleUrl: String(value.selectedSubtitleUrl || "").trim(),
+    isVideoContext: value.isVideoContext !== false
+  };
+}
+
+function extractBvidFromUrl(url) {
+  const text = String(url || "").trim();
+  const match = text.match(/\/video\/(BV[0-9A-Za-z]+)/i) || text.match(/[?&]bvid=(BV[0-9A-Za-z]+)/i);
+  return match?.[1] || "";
+}
+
+function formatLocalDate(value = Date.now()) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function extractPageIndexFromUrl(url) {
+  try {
+    const page = Number(new URL(String(url || "")).searchParams.get("p") || "1");
+    return Number.isFinite(page) && page > 0 ? page : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function buildCanonicalVideoUrl(bvid, pageIndex = 1) {
+  const safeBvid = String(bvid || "").trim();
+  if (!safeBvid) {
+    return "";
+  }
+  if (Number(pageIndex) > 1) {
+    return `https://www.bilibili.com/video/${safeBvid}/?p=${Number(pageIndex)}`;
+  }
+  return `https://www.bilibili.com/video/${safeBvid}/`;
+}
+
+function createBiliHeaders(url) {
+  const headers = new Headers();
+  const isBiliRequest = /(?:api\.bilibili\.com|hdslb\.com)/.test(String(url || ""));
+  if (isBiliRequest) {
+    headers.set("Accept", "application/json, text/plain, */*");
+    headers.set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+    headers.set("Cache-Control", "no-cache");
+    headers.set("Pragma", "no-cache");
+  }
+  return headers;
+}
+
+async function fetchJsonForAi(url) {
+  const headers = createBiliHeaders(url);
+  const options = {
+    method: "GET",
+    credentials: "include",
+    cache: "no-store"
+  };
+  if (headers.size > 0) {
+    options.headers = headers;
+  }
+  if (/(?:api\.bilibili\.com|hdslb\.com)/.test(String(url || ""))) {
+    options.referrer = "https://www.bilibili.com/";
+    options.referrerPolicy = "strict-origin-when-cross-origin";
+  }
+
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchBiliVideoMetaByBvid(bvid) {
+  const payload = await fetchJsonForAi(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`);
+  if (payload?.code !== 0) {
+    throw new Error(String(payload?.message || "无法获取视频信息"));
+  }
+
+  const data = payload.data || {};
+  const pages = Array.isArray(data.pages) ? data.pages : [];
+  return {
+    aid: String(data.aid || "").trim(),
+    title: String(data.title || "").trim(),
+    author: String(data.owner?.name || "").trim(),
+    uploadDate: Number(data.pubdate) > 0 ? formatLocalDate(Number(data.pubdate) * 1000) : "",
+    defaultCid: String(data.cid || "").trim(),
+    defaultDuration: Number(data.duration || 0) || 0,
+    pages: pages.map((item) => ({
+      cid: String(item?.cid || "").trim(),
+      page: Number(item?.page || 0) || 0,
+      part: String(item?.part || "").trim(),
+      duration: Number(item?.duration || 0) || 0
+    }))
+  };
+}
+
+function pickPageForAiContext(pages, ref) {
+  const safePages = Array.isArray(pages) ? pages : [];
+  const targetCid = String(ref?.cid || "").trim();
+  if (targetCid) {
+    const byCid = safePages.find((item) => String(item?.cid || "") === targetCid);
+    if (byCid) {
+      return byCid;
+    }
+  }
+
+  const pageIndex = extractPageIndexFromUrl(ref?.url || "");
+  const byPage = safePages.find((item) => Number(item?.page) === pageIndex);
+  if (byPage) {
+    return byPage;
+  }
+
+  return safePages[0] || null;
+}
+
+function buildSubtitleInfoRequests({ bvid, cid, aid }) {
+  const safeBvid = encodeURIComponent(String(bvid || ""));
+  const safeCid = encodeURIComponent(String(cid || ""));
+  const safeAid = encodeURIComponent(String(aid || ""));
+  const requests = [];
+
+  if (aid) {
+    requests.push({
+      source: "player-wbi-v2",
+      url:
+        "https://api.bilibili.com/x/player/wbi/v2" +
+        `?aid=${safeAid}` +
+        `&cid=${safeCid}` +
+        (bvid ? `&bvid=${safeBvid}` : "")
+    });
+  }
+
+  requests.push({
+    source: "player-v2",
+    url:
+      "https://api.bilibili.com/x/player/v2" +
+      (bvid ? `?bvid=${safeBvid}` : "?") +
+      `${bvid ? "&" : ""}cid=${safeCid}` +
+      (aid ? `&aid=${safeAid}` : "")
+  });
+
+  return requests;
+}
+
+function mapSubtitleTracks(subtitles, source = "unknown") {
+  return (subtitles || []).map((item) => ({
+    id: item?.id === undefined || item?.id === null ? "" : String(item.id),
+    lan: item?.lan || "",
+    lanDoc: item?.lan_doc || "",
+    subtitleUrl: normalizeSubtitleUrl(item?.subtitle_url || ""),
+    source
+  }));
+}
+
+function normalizeSubtitleUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.startsWith("//")) {
+    return `https:${text}`;
+  }
+  return text;
+}
+
+function mapChaptersFromPlayerData(data) {
+  const raw = Array.isArray(data?.view_points) ? data.view_points : [];
+  return normalizeChapters(
+    raw.map((item) => ({
+      title: String(item?.content || item?.title || item?.label || "").trim(),
+      from: normalizeChapterTime(item?.from ?? item?.start ?? item?.start_time),
+      to: normalizeChapterTime(item?.to ?? item?.end ?? item?.end_time)
+    }))
+  );
+}
+
+function normalizeChapterTime(value) {
+  if (value === undefined || value === null || value === "") {
+    return 0;
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) {
+    return 0;
+  }
+  return num > 60 * 60 * 24 ? num / 1000 : num;
+}
+
+function normalizeChapters(chapters) {
+  const normalized = (chapters || [])
+    .map((item) => ({
+      title: String(item?.title || "").trim(),
+      from: Number(item?.from || 0) || 0,
+      to: Number(item?.to || 0) || 0
+    }))
+    .filter((item) => item.title && item.from >= 0)
+    .sort((a, b) => a.from - b.from);
+
+  const unique = [];
+  const seen = new Set();
+  normalized.forEach((item) => {
+    const key = `${Math.floor(item.from * 10)}|${item.title.toLowerCase()}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    unique.push(item);
+  });
+  return unique;
+}
+
+function normalizeSubtitleTracks(subtitles) {
+  return [...(subtitles || [])].sort((a, b) => {
+    const priorityGap = subtitlePriority(a) - subtitlePriority(b);
+    if (priorityGap !== 0) {
+      return priorityGap;
+    }
+    return String(a.subtitleUrl || "").localeCompare(String(b.subtitleUrl || ""));
+  });
+}
+
+function subtitlePriority(item) {
+  const lan = String(item?.lan || "").toLowerCase();
+  const label = String(item?.lanDoc || "").toLowerCase();
+  if (lan === "zh-cn" || lan === "zh-hans") return 0;
+  if (lan === "zh") return 1;
+  if (lan.includes("zh")) return 2;
+  if (label.includes("中文")) return 3;
+  if (lan === "en" || lan === "en-us" || lan === "en-gb") return 10;
+  if (lan.includes("en")) return 11;
+  if (label.includes("英文") || label.includes("英语") || label.includes("english")) return 12;
+  return 50;
+}
+
+function normalizeSubtitleUrlForCache(url) {
+  const text = String(url || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    const path = parsed.pathname.replace(/[^\w/.-]+/g, "_");
+    return `${parsed.hostname}${path}`;
+  } catch {
+    return text.replace(/[^\w/.-]+/g, "_");
+  }
+}
+
+function pickPreferredSubtitleTrack(subtitles, { previousId = "", previousUrl = "", previousLang = "" } = {}) {
+  const tracks = subtitles || [];
+  if (!tracks.length) {
+    return null;
+  }
+
+  if (previousId) {
+    const byId = tracks.find((item) => String(item.id || "") === String(previousId));
+    if (byId) {
+      return byId;
+    }
+  }
+
+  const normalizedUrl = normalizeSubtitleUrlForCache(previousUrl);
+  if (normalizedUrl) {
+    const byUrl = tracks.find((item) => normalizeSubtitleUrlForCache(item.subtitleUrl) === normalizedUrl);
+    if (byUrl) {
+      return byUrl;
+    }
+  }
+
+  const normalizedLang = String(previousLang || "").trim().toLowerCase();
+  if (normalizedLang) {
+    const byLang = tracks.find((item) => String(item.lanDoc || item.lan || "").trim().toLowerCase() === normalizedLang);
+    if (byLang) {
+      return byLang;
+    }
+  }
+
+  return tracks[0];
+}
+
+async function fetchBiliSubtitleBundle({ bvid, cid, aid }) {
+  const requests = buildSubtitleInfoRequests({ bvid, cid, aid });
+  for (const request of requests) {
+    let payload = null;
+    try {
+      payload = await fetchJsonForAi(request.url);
+    } catch {
+      continue;
+    }
+    if (payload?.code !== 0) {
+      continue;
+    }
+    const tracks = mapSubtitleTracks(payload.data?.subtitle?.subtitles || [], request.source).filter((item) => item.subtitleUrl);
+    return {
+      tracks,
+      chapters: mapChaptersFromPlayerData(payload.data)
+    };
+  }
+  throw new Error("无法获取字幕列表");
+}
+
+async function fetchBiliSubtitleBody(url) {
+  const payload = await fetchJsonForAi(url);
+  return Array.isArray(payload?.body) ? payload.body : [];
+}
+
+async function fetchBiliHotComments(aid, count = 18) {
+  const safeAid = Number(aid || 0) || 0;
+  if (!safeAid) {
+    return [];
+  }
+  const url = `https://api.bilibili.com/x/v2/reply/main?type=1&oid=${safeAid}&mode=3&ps=${count}&pn=1`;
+  const payload = await fetchJsonForAi(url).catch(() => null);
+  const replies = Array.isArray(payload?.data?.replies) ? payload.data.replies : [];
+  return replies.slice(0, count).map((item) => ({
+    uname: item?.member?.uname || "匿名",
+    like: item?.like || 0,
+    message: String(item?.content?.message || "").slice(0, 500)
+  }));
+}
+
+function shouldShowHoursInAiNote(meta, body) {
+  const subtitleMaxTo = (body || []).reduce((max, item) => Math.max(max, Number(item?.to || 0) || 0), 0);
+  const chapterMaxTo = (meta?.chapters || []).reduce((max, item) => Math.max(max, Number(item?.from || 0) || 0, Number(item?.to || 0) || 0), 0);
+  const duration = Number(meta?.videoDuration || 0) || 0;
+  return Math.max(subtitleMaxTo, chapterMaxTo, duration) >= 3600;
+}
+
+function formatCompactTimestamp(seconds, withHours) {
+  const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hour = Math.floor(safe / 3600);
+  const minute = Math.floor((safe % 3600) / 60);
+  const second = safe % 60;
+  if (withHours) {
+    return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+  }
+  const totalMinutes = Math.floor(safe / 60);
+  return `${String(totalMinutes).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+}
+
+function buildAiSubtitleLine(item, includeTimestampInBody, withHours) {
+  const text = String(item?.content || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (!includeTimestampInBody) {
+    return text;
+  }
+  return `\`${formatCompactTimestamp(item.from, withHours)}\` ${text}`;
+}
+
+function buildAiSubtitleSectionLines(body, chapters, includeTimestampInBody, withHours) {
+  const subtitleItems = (body || [])
+    .map((item, index) => ({ ...item, _index: index, text: String(item?.content || "").trim() }))
+    .filter((item) => item.text);
+  if (!subtitleItems.length) {
+    return ["（暂无字幕）"];
+  }
+
+  if (!Array.isArray(chapters) || !chapters.length) {
+    return subtitleItems.map((item) => buildAiSubtitleLine(item, includeTimestampInBody, withHours));
+  }
+
+  const lines = [];
+  const usedIndexes = new Set();
+  chapters.forEach((chapter, idx) => {
+    const start = Number(chapter.from || 0) || 0;
+    const next = chapters[idx + 1];
+    const chapterTo = Number(chapter.to || 0) || 0;
+    let end = Infinity;
+    if (next && Number(next.from) > start) {
+      end = Number(next.from);
+    } else if (chapterTo > start) {
+      end = chapterTo;
+    }
+    const sectionItems = subtitleItems.filter((item) => {
+      const from = Number(item.from || 0) || 0;
+      return from + 0.001 >= start && (end === Infinity ? true : from < end);
+    });
+    if (!sectionItems.length) {
+      return;
+    }
+    const chapterStamp = includeTimestampInBody ? ` \`${formatCompactTimestamp(start, withHours)}\`` : "";
+    lines.push(`### ${chapter.title}${chapterStamp}`, "");
+    sectionItems.forEach((item) => {
+      usedIndexes.add(item._index);
+      lines.push(buildAiSubtitleLine(item, includeTimestampInBody, withHours));
+    });
+    lines.push("");
+  });
+
+  const remaining = subtitleItems.filter((item) => !usedIndexes.has(item._index));
+  if (remaining.length) {
+    lines.push("### 其他片段", "");
+    remaining.forEach((item) => lines.push(buildAiSubtitleLine(item, includeTimestampInBody, withHours)));
+  }
+
+  while (lines.length && !lines[lines.length - 1]) {
+    lines.pop();
+  }
+  return lines;
+}
+
+function buildAiConversationMarkdown(meta, body, settings) {
+  const includeTimestampInBody = settings?.includeTimestampInBody !== false;
+  const withHours = shouldShowHoursInAiNote(meta, body);
+  const lines = [];
+  const chapters = Array.isArray(meta?.chapters) ? meta.chapters : [];
+  if (chapters.length) {
+    lines.push("## 章节", "");
+    chapters.forEach((item) => {
+      const stamp = includeTimestampInBody ? `\`${formatCompactTimestamp(item.from, withHours)}\` ` : "";
+      lines.push(`- ${stamp}${item.title}`);
+    });
+    lines.push("");
+  }
+  lines.push("## 字幕", "", ...buildAiSubtitleSectionLines(body, chapters, includeTimestampInBody, withHours));
+  return lines.join("\n");
+}
+
+async function resolveAiSidepanelContext(contextRef) {
+  const ref = normalizeAiContextRef(contextRef);
+  if (!ref.isVideoContext || !ref.bvid) {
+    return {
+      title: ref.title,
+      url: ref.url,
+      author: ref.author,
+      uploadDate: ref.uploadDate,
+      subtitleMarkdown: "",
+      subtitleBody: [],
+      hotComments: [],
+      isVideoContext: false
+    };
+  }
+
+  const settings = await getMergedSettings();
+  const videoMeta = await fetchBiliVideoMetaByBvid(ref.bvid);
+  const page = pickPageForAiContext(videoMeta.pages, ref);
+  const cid = String(page?.cid || ref.cid || videoMeta.defaultCid || "").trim();
+  if (!cid) {
+    throw new Error("无法定位原视频分P");
+  }
+  const aid = String(videoMeta.aid || ref.aid || "").trim();
+  const subtitleBundle = await fetchBiliSubtitleBundle({ bvid: ref.bvid, cid, aid });
+  const tracks = normalizeSubtitleTracks(subtitleBundle.tracks || []);
+  if (!tracks.length) {
+    throw new Error("原视频暂时没有可用字幕");
+  }
+  const selectedTrack = pickPreferredSubtitleTrack(tracks, {
+    previousId: ref.selectedSubtitleId,
+    previousUrl: ref.selectedSubtitleUrl,
+    previousLang: ref.subtitleLang
+  }) || tracks[0];
+  const body = await fetchBiliSubtitleBody(selectedTrack.subtitleUrl);
+  if (!body.length) {
+    throw new Error("原视频字幕为空");
+  }
+
+  const pageIndex = Number(page?.page || extractPageIndexFromUrl(ref.url) || 1) || 1;
+  const hotComments = await fetchBiliHotComments(aid);
+  const title = String(videoMeta.title || ref.title || "").trim();
+  const author = String(videoMeta.author || ref.author || "").trim();
+  const uploadDate = String(videoMeta.uploadDate || ref.uploadDate || "").trim();
+  const url = buildCanonicalVideoUrl(ref.bvid, pageIndex) || ref.url;
+  const contextMeta = {
+    title,
+    chapters: subtitleBundle.chapters || [],
+    videoDuration: Number(page?.duration || videoMeta.defaultDuration || 0) || 0
+  };
+
+  return {
+    title,
+    url,
+    author,
+    uploadDate,
+    bvid: ref.bvid,
+    cid,
+    aid,
+    subtitleLang: String(selectedTrack.lanDoc || selectedTrack.lan || "").trim(),
+    selectedSubtitleId: String(selectedTrack.id || "").trim(),
+    selectedSubtitleUrl: String(selectedTrack.subtitleUrl || "").trim(),
+    subtitleBody: body,
+    subtitleMarkdown: buildAiConversationMarkdown(contextMeta, body, settings),
+    subtitleOptions: tracks.map((item) => ({
+      id: String(item.id || "").trim(),
+      url: String(item.subtitleUrl || "").trim(),
+      lang: String(item.lanDoc || item.lan || "").trim()
+    })),
+    hotComments,
+    isVideoContext: true
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") {
     return false;
@@ -501,6 +1003,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const tabId = Number(message.tabId || 0) || 0;
     const forceRefresh = message.forceRefresh === true;
     getAiSidepanelState(tabId, { forceRefresh })
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "ai-sidepanel-resolve-context") {
+    resolveAiSidepanelContext(message.contextRef || {})
       .then((payload) => sendResponse({ ok: true, payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
