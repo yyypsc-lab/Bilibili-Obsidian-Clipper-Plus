@@ -11,7 +11,14 @@
       <header class="top">
         <strong>B站字幕</strong>
         <div class="top-actions">
-          <button id="aiBtn" type="button" class="ghost">AI</button>
+          <button id="aiBtn" type="button" class="ghost ghost-ai">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <path d="M11.5 4.2l2.05 5.5 5.45 2.05-5.45 2.05-2.05 5.5-2.05-5.5L4 11.75 9.45 9.7l2.05-5.5z"></path>
+              <path d="M18.4 4.6l.72 1.92 1.92.72-1.92.72-.72 1.92-.72-1.92-1.92-.72 1.92-.72.72-1.92z"></path>
+              <path d="M18.1 13.9l.52 1.38 1.38.52-1.38.52-.52 1.38-.52-1.38-1.38-.52 1.38-.52.52-1.38z"></path>
+            </svg>
+            <span>AI</span>
+          </button>
           <button id="settingsBtn" type="button" class="ghost">设置</button>
         </div>
       </header>
@@ -26,10 +33,10 @@
         <div class="prop-row"><span class="k">tags</span><span id="propTags" class="v"></span></div>
       </section>
 
-      <label class="label" for="subtitleSelect">字幕语言</label>
+      <label class="label" for="subtitleSelect">语言</label>
       <select id="subtitleSelect"></select>
 
-      <label class="label" for="preview">字幕预览</label>
+      <label class="label" for="preview">预览</label>
       <textarea id="preview" readonly wrap="off"></textarea>
 
       <div class="actions">

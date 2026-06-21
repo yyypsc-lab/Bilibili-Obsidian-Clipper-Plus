@@ -28,7 +28,7 @@ function formatLocalDate(value = Date.now()) {
 }
 
 init().catch((error) => {
-  setStatus(`初始化失败：${error.message}`);
+  setStatus(`初始化失败：${error.message}`, true);
 });
 
 async function init() {
@@ -82,6 +82,7 @@ function bindEvents() {
     setStatus("正在发送到 Obsidian...");
     const resp = await sendToContent({ type: "popup-send-obsidian" });
     if (!resp?.ok) {
+      setStatus(`发送失败：${resp?.error || "未知错误"}`, true);
       setMessage(`发送失败：${resp?.error || "未知错误"}`);
     }
     render(resp?.payload || latestPayload);
@@ -96,6 +97,7 @@ function bindEvents() {
 
     const prepResp = await sendToContent({ type: "popup-get-state" });
     if (!prepResp?.ok) {
+      setStatus(prepResp?.error || "请刷新浏览器网页重试，或当前网页不支持", true);
       setMessage(prepResp?.error || "请刷新浏览器网页重试，或当前网页不支持");
       return;
     }
@@ -107,6 +109,7 @@ function bindEvents() {
       tabId: tab.id
     });
     if (!resp?.ok) {
+      setStatus(`打开失败：${resp?.error || "未知错误"}`, true);
       setMessage(`打开失败：${resp?.error || "未知错误"}`);
       return;
     }
@@ -129,6 +132,7 @@ function bindEvents() {
       subtitleId: String(option.dataset.id || "")
     });
     if (!resp?.ok) {
+      setStatus(`切换失败：${resp?.error || "未知错误"}`, true);
       setMessage(`切换失败：${resp?.error || "未知错误"}`);
     }
     render(resp?.payload || latestPayload);
@@ -148,6 +152,7 @@ function bindEvents() {
 
       const tab = await getActiveTab();
       if (!tab?.id) {
+        setStatus("找不到当前标签页。", true);
         setMessage("找不到当前标签页。");
         return;
       }
@@ -159,6 +164,7 @@ function bindEvents() {
       }
       window.setTimeout(() => window.close(), 80);
     } catch (error) {
+      setStatus(`打开侧边栏失败：${error?.message || error}`, true);
       setMessage(`打开侧边栏失败：${error?.message || error}`);
     }
   });
@@ -168,8 +174,13 @@ async function refreshFromTab() {
   setStatus("正在抓取...");
   const resp = await sendToContent({ type: "popup-refresh" });
   if (!resp?.ok) {
-    const errorText = resp?.error || "请在 B 站视频页使用。";
-    setStatus(`抓取失败：${errorText}`);
+    const errorText = (resp?.error || "请在 B 站视频页使用。").replace(
+      "请刷新浏览器网页重试，或当前网页不支持",
+      "请刷新网页重试，或当前网页不支持"
+    );
+    setStatus(`抓取失败：${errorText}`, true);
+    render(resp?.payload || latestPayload, { preserveStatus: true });
+    return;
   }
   render(resp?.payload || latestPayload);
 }
@@ -185,13 +196,17 @@ async function ensurePayload() {
   return latestPayload;
 }
 
-function render(payload) {
+function render(payload, { preserveStatus = false } = {}) {
   if (!payload) {
     return;
   }
   latestPayload = payload;
 
-  setStatus(payload.status || "准备就绪");
+  if (!preserveStatus) {
+    const statusText = String(payload.status || "准备就绪");
+    const isErrorStatus = /失败|错误|不可用|不支持/.test(statusText);
+    setStatus(statusText, isErrorStatus);
+  }
   setMessage(payload.message || "");
 
   setText(el.propTitle, payload.title || "-");
@@ -227,8 +242,9 @@ function setText(node, text) {
   node.textContent = String(text || "");
 }
 
-function setStatus(text) {
+function setStatus(text, isError = false) {
   el.status.textContent = String(text || "");
+  el.status.classList.toggle("is-error", Boolean(isError));
 }
 
 function setMessage(text) {
