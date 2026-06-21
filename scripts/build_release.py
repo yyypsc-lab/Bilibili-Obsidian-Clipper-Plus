@@ -39,6 +39,7 @@ def build_variant(manifest: dict, browser: str, version: str):
     variant_manifest = json.loads(json.dumps(manifest))
     if browser == "chrome":
         variant_manifest.pop("browser_specific_settings", None)
+        variant_manifest.pop("sidebar_action", None)
         background = variant_manifest.setdefault("background", {})
         background.pop("scripts", None)
         background["service_worker"] = "background.js"
@@ -46,6 +47,20 @@ def build_variant(manifest: dict, browser: str, version: str):
         gecko = variant_manifest.setdefault("browser_specific_settings", {}).setdefault("gecko", {})
         gecko.setdefault("id", "bilibili-obsidian-clipper@github.com")
         gecko.setdefault("strict_min_version", "109.0")
+        permissions = variant_manifest.get("permissions", [])
+        if isinstance(permissions, list):
+            variant_manifest["permissions"] = [item for item in permissions if item != "sidePanel"]
+        variant_manifest.pop("side_panel", None)
+        variant_manifest["sidebar_action"] = {
+            "default_title": "Bilibili Obsidian Clipper",
+            "default_icon": {
+                "16": "icons/icon16.png",
+                "32": "icons/icon32.png",
+                "48": "icons/icon48.png"
+            },
+            "default_panel": "sidepanel.html",
+            "open_at_install": False
+        }
         background = variant_manifest.setdefault("background", {})
         background.pop("service_worker", None)
         background["scripts"] = ["background.js"]

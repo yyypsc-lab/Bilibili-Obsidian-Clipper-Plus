@@ -139,17 +139,24 @@ function bindEvents() {
   });
 
   el.aiBtn?.addEventListener("click", async () => {
-    const tab = await getActiveTab();
-    if (!tab?.id) {
-      setMessage("找不到当前标签页。");
-      return;
-    }
-    if (!chrome.sidePanel?.open) {
-      setMessage("当前浏览器不支持侧边栏，请使用 Chrome 114+ 或 Edge。");
-      return;
-    }
     try {
-      await chrome.sidePanel.open({ tabId: tab.id });
+      if (globalThis.browser?.sidebarAction?.open) {
+        globalThis.browser.sidebarAction.open();
+        window.setTimeout(() => window.close(), 80);
+        return;
+      }
+
+      const tab = await getActiveTab();
+      if (!tab?.id) {
+        setMessage("找不到当前标签页。");
+        return;
+      }
+
+      if (chrome.sidePanel?.open) {
+        await chrome.sidePanel.open({ tabId: tab.id });
+      } else {
+        throw new Error("当前浏览器不支持扩展侧边栏");
+      }
       window.setTimeout(() => window.close(), 80);
     } catch (error) {
       setMessage(`打开侧边栏失败：${error?.message || error}`);
