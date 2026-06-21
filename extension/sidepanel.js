@@ -136,6 +136,14 @@ function bindEvents() {
     }
     scheduleLiveContextSync(Boolean(changeInfo.url));
   });
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (
+      (areaName === "sync" && (changes.aiProviders || changes.aiSystemPrompt || changes.aiPresetPrompts)) ||
+      (areaName === "local" && changes.aiProviderKeys)
+    ) {
+      void refreshProvidersAndPrefsAfterExternalChange();
+    }
+  });
 }
 
 function autosizeInput() {
@@ -154,7 +162,7 @@ function setStreamingUiState(isStreaming, { stopping = false } = {}) {
   }
 }
 
-async function loadProvidersAndPrefs() {
+async function loadProvidersAndPrefs({ preferredProviderId = "" } = {}) {
   const [providersResp, settingsResp] = await Promise.all([
     sendRuntimeMessage({ type: "ai-providers-list" }),
     sendRuntimeMessage({ type: "get-settings" }).catch(() => ({ ok: false }))
@@ -172,11 +180,11 @@ async function loadProvidersAndPrefs() {
     aiPrefs.aiPresetPrompts = DEFAULT_PRESET_PROMPTS.slice();
     void persistAiPresetPrompts();
   }
-  renderModelSelect();
+  renderModelSelect(preferredProviderId);
   renderPresetPrompts();
 }
 
-function renderModelSelect() {
+function renderModelSelect(preferredProviderId = "") {
   if (!providers.length) {
     els.modelSelect.innerHTML = '<option value="">未配置平台</option>';
     els.modelSelect.disabled = true;
@@ -191,11 +199,21 @@ function renderModelSelect() {
     })
     .join("");
 
-  const savedProviderId = localStorage.getItem(SELECTED_PROVIDER_KEY) || "";
+  const savedProviderId = String(preferredProviderId || localStorage.getItem(SELECTED_PROVIDER_KEY) || "").trim();
   const matchedProvider = providers.find((item) => item.id === savedProviderId) || providers[0];
   els.modelSelect.value = matchedProvider?.id || "";
   els.modelSelect.disabled = false;
   updateModelSelectWidth();
+}
+
+async function refreshProvidersAndPrefsAfterExternalChange() {
+  const previousProviderId = String(els.modelSelect?.value || localStorage.getItem(SELECTED_PROVIDER_KEY) || "").trim();
+  await loadProvidersAndPrefs({ preferredProviderId: previousProviderId });
+  if (activePort) {
+    return;
+  }
+  renderHistoryList();
+  renderInitialState();
 }
 
 function updateModelSelectWidth() {
