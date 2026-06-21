@@ -33,6 +33,8 @@
 
 ![Bilibili Obsidian Clipper 功能演示](docs/images/feature-demo-v2.png)
 
+![Bilibili Obsidian Clipper AI 侧边栏演示](docs/images/33.png)
+
 ## 安装方式
 
 ### Chrome / Edge
