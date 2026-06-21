@@ -70,31 +70,55 @@ body {
 }
 
 .sp-model-select {
-  width: 144px;
+  width: auto;
   height: 28px;
-  min-width: 144px;
-  max-width: 144px;
-  padding: 0 6px;
+  min-width: 92px;
+  max-width: 172px;
+  padding: 0 28px 0 12px;
   border: 1px solid #e5e7eb;
   border-radius: 999px;
   background: #fff;
   font: inherit;
   font-size: 11px;
   color: #374151;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #98928a 50%),
+    linear-gradient(135deg, #98928a 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 1px),
+    calc(100% - 10px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
 }
 
 .sp-icon-btn {
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: #6b7280;
   cursor: pointer;
-  font-size: 21px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.sp-icon-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sp-icon-btn.is-loading svg {
+  animation: sp-icon-rotate 0.95s linear infinite;
 }
 
 .sp-icon-btn + .sp-icon-btn {
@@ -104,6 +128,15 @@ body {
 .sp-icon-btn:hover {
   background: #f5f7fa;
   color: #111827;
+}
+
+@keyframes sp-icon-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .sp-messages {
@@ -354,8 +387,9 @@ body {
   margin: auto;
   text-align: center;
   color: #6b7280;
-  font-size: 11px;
+  font-size: 14px;
   padding: 18px 16px;
+  line-height: 1.65;
 }
 
 .sp-center-error a {
@@ -487,6 +521,19 @@ body {
   display: none !important;
 }
 
+.sp-history-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sp-history-popover-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+}
+
 .sp-preset-list {
   display: flex;
   flex-wrap: wrap;
@@ -509,6 +556,22 @@ body {
   font-size: 11px;
 }
 
+.sp-history-clear-btn {
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.sp-history-clear-btn:hover {
+  color: #dc2626;
+  background: #fff4f4;
+}
+
 .sp-history-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px;
@@ -524,6 +587,11 @@ body {
 .sp-history-item.is-active {
   border-color: #d8dee6;
   background: #f4f6f8;
+}
+
+.sp-history-item.is-live-match {
+  border-color: #f3dcc3;
+  background: #fff6ee;
 }
 
 .sp-history-open {
@@ -682,7 +750,44 @@ body {
   outline: none;
 }
 
+.sp-non-video-context #spInput {
+  min-height: 72px;
+}
+
 #spInput:focus {
   border-color: #cfd8e3;
   box-shadow: 0 0 0 2px rgba(207, 216, 227, 0.32);
+}
+
+.sp-stop-btn {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #e3e8ef;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #6b7280;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sp-stop-btn:hover {
+  background: #f7f8fb;
+  color: #111827;
+  border-color: #d8dee6;
+}
+
+.sp-stop-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.sp-msg-stopped {
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.4;
+  padding-top: 2px;
 }

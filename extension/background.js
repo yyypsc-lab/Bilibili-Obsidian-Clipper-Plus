@@ -1,3 +1,10 @@
+const DEFAULT_PRESET_PROMPTS = [
+  "生成视频摘要和结论",
+  "按章节整理视频内容",
+  "生成带时间轴的笔记"
+];
+const STREAM_FIRST_TOKEN_TIMEOUT_MS = 90000;
+
 const DEFAULT_SYNC_SETTINGS = {
   noteFolder: "Clippings/Bilibili",
   obsidianApiBaseUrl: "http://127.0.0.1:27123",
@@ -25,8 +32,15 @@ const DEFAULT_SYNC_SETTINGS = {
     "tags"
   ],
   fixedFrontmatterProperties: [],
-  aiSystemPrompt: "结合字幕与评论理解视频，先给结论，再提炼重点，表达简洁，不要输出思考过程或 think 标签。",
-  aiPresetPrompts: []
+  notePlaceholderSections: [],
+  aiSystemPrompt: [
+    "你是一名专业的视频内容分析助手。基于字幕与评论提炼高价值信息，不要复述内容，不要输出思考过程或 think 标签。",
+    "优先输出：主题与核心观点、关键数据与事实、逻辑链路与重要结论、可执行建议。",
+    "回答应结构化、信息密度高、便于收藏和复习；自动过滤广告、废话和重复表达。",
+    "信息不足时明确说明，不得猜测或编造；涉及专业内容时，区分事实、数据、推测与作者观点。",
+    "输出时间戳时请使用普通正文格式，如 09:15、01:09:15，不要使用反引号、代码块或表格代码格式包裹时间戳。"
+  ].join("\n"),
+  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice()
 };
 
 const DEFAULT_LOCAL_SETTINGS = {
@@ -1060,20 +1074,62 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
 
+  let activeAbortController = null;
+  let activeAbortMeta = null;
+  let firstTokenTimeoutId = 0;
+
+  const clearActiveRequestState = () => {
+    if (firstTokenTimeoutId) {
+      clearTimeout(firstTokenTimeoutId);
+      firstTokenTimeoutId = 0;
+    }
+    activeAbortController = null;
+    activeAbortMeta = null;
+  };
+
+  const abortActiveRequest = (meta = null) => {
+    activeAbortMeta = meta;
+    if (firstTokenTimeoutId) {
+      clearTimeout(firstTokenTimeoutId);
+      firstTokenTimeoutId = 0;
+    }
+    if (activeAbortController && !activeAbortController.signal.aborted) {
+      activeAbortController.abort();
+    }
+  };
+
+  port.onDisconnect.addListener(() => {
+    abortActiveRequest({ type: "silent" });
+    clearActiveRequestState();
+  });
+
   port.onMessage.addListener(async (msg) => {
-    if (!msg || msg.action !== "chat") return;
+    if (!msg) return;
+    if (msg.action === "stop") {
+      abortActiveRequest({ type: "stopped", reason: "已停止生成" });
+      return;
+    }
+    if (msg.action !== "chat") return;
 
     try {
+      abortActiveRequest({ type: "silent" });
+      clearActiveRequestState();
+      activeAbortController = new AbortController();
+      firstTokenTimeoutId = setTimeout(() => {
+        abortActiveRequest({ type: "timeout", reason: "请求超时（90 秒未返回），已自动中断" });
+      }, STREAM_FIRST_TOKEN_TIMEOUT_MS);
       const providers = await loadAiProviders();
       const provider = providers.find((p) => p.id === msg.providerId);
       if (!provider) {
         port.postMessage({ type: "error", error: "未找到选中的平台" });
+        clearActiveRequestState();
         return;
       }
       const keys = await loadAiProviderKeys();
       const apiKey = keys[provider.id] || "";
       if (provider.requiresKey !== false && !apiKey) {
         port.postMessage({ type: "error", error: "该平台 API Key 未配置" });
+        clearActiveRequestState();
         return;
       }
       await streamChat({
@@ -1081,10 +1137,20 @@ chrome.runtime.onConnect.addListener((port) => {
         context: msg.context || {},
         userPrompt: msg.prompt || "",
         history: Array.isArray(msg.history) ? msg.history : [],
-        port
+        port,
+        signal: activeAbortController.signal,
+        getAbortMeta: () => activeAbortMeta,
+        onFirstToken: () => {
+          if (firstTokenTimeoutId) {
+            clearTimeout(firstTokenTimeoutId);
+            firstTokenTimeoutId = 0;
+          }
+        }
       });
     } catch (e) {
       port.postMessage({ type: "error", error: String(e?.message || e) });
+    } finally {
+      clearActiveRequestState();
     }
   });
 });
@@ -1125,6 +1191,7 @@ async function getMergedSettings() {
   merged.readerChapterVisibility = normalizeReaderChapterVisibility(merged.readerChapterVisibility);
   merged.readerTranscriptVisible = normalizeReaderTranscriptVisible(merged.readerTranscriptVisible);
   merged.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(merged.fixedFrontmatterProperties);
+  merged.notePlaceholderSections = normalizeNotePlaceholderSections(merged.notePlaceholderSections);
   merged.aiSystemPrompt = normalizeAiSystemPrompt(merged.aiSystemPrompt);
   merged.aiPresetPrompts = normalizeAiPresetPrompts(merged.aiPresetPrompts);
   let apiKey = normalizeApiKey(localSettings.obsidianApiKey);
@@ -1157,6 +1224,7 @@ async function saveSettings(settings) {
   syncPayload.readerChapterVisibility = normalizeReaderChapterVisibility(syncPayload.readerChapterVisibility);
   syncPayload.readerTranscriptVisible = normalizeReaderTranscriptVisible(syncPayload.readerTranscriptVisible);
   syncPayload.fixedFrontmatterProperties = normalizeFixedFrontmatterProperties(syncPayload.fixedFrontmatterProperties);
+  syncPayload.notePlaceholderSections = normalizeNotePlaceholderSections(syncPayload.notePlaceholderSections);
   syncPayload.aiSystemPrompt = normalizeAiSystemPrompt(syncPayload.aiSystemPrompt);
   syncPayload.aiPresetPrompts = normalizeAiPresetPrompts(syncPayload.aiPresetPrompts);
 
@@ -1174,6 +1242,28 @@ function toString(value) {
 
 function normalizeApiKey(value) {
   return toString(value).trim().replace(/^Bearer\s+/i, "").trim();
+}
+
+function normalizeNotePlaceholderSections(items) {
+  const allowedPositions = new Set(["before_intro", "before_chapters", "before_subtitle"]);
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .map((item) => {
+      const title = toString(item?.title).trim();
+      const content = toString(item?.content).trim();
+      const position = allowedPositions.has(toString(item?.position).trim())
+        ? toString(item?.position).trim()
+        : "before_intro";
+      return {
+        title,
+        position,
+        content
+      };
+    })
+    .filter((item) => item.title)
+    .slice(0, 5);
 }
 
 function normalizeDownloadFormat(value) {
@@ -1358,9 +1448,8 @@ function buildAiMessages({ context, userPrompt, history, systemPrompt }) {
         `作者：${ctx.author || "未知"} | 上传日期：${ctx.uploadDate || "未知"}`
       ]
     : [
-        "你是一个通用网页助手。",
-        `当前页面标题：「${ctx.title || "未知"}」`,
-        `当前页面链接：${ctx.url || "未知"}`
+        "你是一个通用 AI 助手。",
+        "当前对话没有页面上下文，请仅基于用户消息和历史对话回答。"
       ];
 
   if (ctx.subtitleMarkdown) {
@@ -1415,7 +1504,7 @@ async function* parseOpenAISSE(response) {
   }
 }
 
-async function streamChat({ provider, context, userPrompt, history, port }) {
+async function streamChat({ provider, context, userPrompt, history, port, signal, getAbortMeta, onFirstToken }) {
   if (!port) return;
   const baseUrl = String(provider?.baseUrl || "").trim().replace(/\/+$/, "");
   if (!baseUrl) {
@@ -1444,6 +1533,7 @@ async function streamChat({ provider, context, userPrompt, history, port }) {
     response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers,
+      signal,
       body: JSON.stringify({
         model: provider.model,
         messages,
@@ -1464,64 +1554,53 @@ async function streamChat({ provider, context, userPrompt, history, port }) {
   }
 
   try {
+    let hasSentFirstToken = false;
     for await (const token of parseOpenAISSE(response)) {
+      if (!hasSentFirstToken) {
+        hasSentFirstToken = true;
+        onFirstToken?.();
+      }
       port.postMessage({ type: "token", data: token });
     }
     port.postMessage({ type: "done" });
   } catch (e) {
+    if (signal?.aborted) {
+      const abortMeta = typeof getAbortMeta === "function" ? getAbortMeta() : null;
+      if (abortMeta?.type === "stopped") {
+        port.postMessage({ type: "stopped", reason: abortMeta.reason || "已停止生成" });
+        return;
+      }
+      if (abortMeta?.type === "timeout") {
+        port.postMessage({ type: "error", error: abortMeta.reason || "请求超时，已自动中断" });
+        return;
+      }
+      return;
+    }
     port.postMessage({ type: "error", error: String(e?.message || e) });
   }
 }
 
 async function testAiConnection({ baseUrl, apiKey, model }) {
   const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
-  const url = `${normalizedBaseUrl}/models`;
-  const headers = { Accept: "application/json" };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-
-  // 401/403 不重试（重试也无意义），其他错误重试一次
-  const shouldRetry = (status) => status >= 500 || status === 408 || status === 429;
-  const delays = [0, 700];
-
-  let lastError = "";
-  for (let i = 0; i < delays.length; i += 1) {
-    if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
-    let response;
-    try {
-      response = await fetch(url, { method: "GET", headers, cache: "no-store" });
-    } catch (e) {
-      lastError = `无法连接：${e?.message || e}`;
-      continue;
-    }
-    if (response.ok) {
-      let models = [];
-      try {
-        const data = await response.json();
-        if (Array.isArray(data?.data)) models = data.data.map((m) => m?.id).filter(Boolean);
-      } catch {}
-      return { ok: true, models };
-    }
-    let detail = "";
-    try { detail = (await response.text()).slice(0, 200); } catch {}
-    const errText = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
-    if (!shouldRetry(response.status) || i === delays.length - 1) {
-      if (!model) {
-        return { ok: false, error: errText };
-      }
-      const chatProbe = await probeAiChatCompletion({
-        baseUrl: normalizedBaseUrl,
-        apiKey,
-        model,
-        headers
-      });
-      if (chatProbe.ok) {
-        return { ok: true, models: [], note: "chat-completions probe" };
-      }
-      return { ok: false, error: chatProbe.error || errText };
-    }
-    lastError = errText;
+  const normalizedModel = String(model || "").trim();
+  if (!normalizedBaseUrl) {
+    return { ok: false, error: "请填写 baseUrl" };
   }
-  return { ok: false, error: lastError || "未知错误" };
+  if (!normalizedModel) {
+    return { ok: false, error: "请填写模型名" };
+  }
+
+  const headers = { Accept: "application/json" };
+  if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  return probeAiChatCompletion({
+    baseUrl: normalizedBaseUrl,
+    apiKey,
+    model: normalizedModel,
+    headers
+  });
 }
 
 async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {

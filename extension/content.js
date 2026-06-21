@@ -25,7 +25,8 @@ const DEFAULT_SETTINGS = {
     "created",
     "tags"
   ],
-  fixedFrontmatterProperties: []
+  fixedFrontmatterProperties: [],
+  notePlaceholderSections: []
 };
 
 const BOC_VERSION = "1.1.0";
@@ -4699,21 +4700,27 @@ function buildMarkdown(meta, body, settings) {
   const page = extractPageIndex(location.href);
   const embedIframe = buildBilibiliEmbedIframe(meta, page);
   const intro = String(meta.description || "").trim();
+  const noteSectionContext = buildNotePlaceholderTemplateContext(meta, intro);
+  const noteSections = groupNotePlaceholderSections(settings, noteSectionContext);
 
   const lines = [];
   if (frontMatter) {
     lines.push(frontMatter, "");
   }
   lines.push(embedIframe, "");
+  pushOptionalLines(lines, noteSections.before_intro);
 
   if (intro) {
     lines.push("## 简介", "", intro, "");
   }
 
+  pushOptionalLines(lines, noteSections.before_chapters);
+
   if (chapterLines.length > 0) {
     lines.push("## 章节", "", ...chapterLines, "");
   }
 
+  pushOptionalLines(lines, noteSections.before_subtitle);
   lines.push("## 字幕", "", ...subtitleSectionLines);
 
   return lines.join("\n");
@@ -4827,6 +4834,53 @@ function buildFrontmatterTemplateContext(meta, created, tagsCsv, tagsYaml) {
   };
 }
 
+function buildNotePlaceholderTemplateContext(meta, description) {
+  return {
+    title: String(meta?.title || "").trim(),
+    author: String(meta?.author || "").trim(),
+    url: String(cleanVideoUrl() || "").trim(),
+    upload_date: String(meta?.uploadDate || "").trim(),
+    description: String(description || "").trim()
+  };
+}
+
+function groupNotePlaceholderSections(settings, templateContext = {}) {
+  const groups = {
+    before_intro: [],
+    before_chapters: [],
+    before_subtitle: []
+  };
+  const rows = normalizeNotePlaceholderSections(settings?.notePlaceholderSections);
+  rows.forEach((item) => {
+    const renderedLines = buildNotePlaceholderLines(item, templateContext);
+    if (!renderedLines.length) {
+      return;
+    }
+    groups[item.position].push(...renderedLines);
+  });
+  return groups;
+}
+
+function buildNotePlaceholderLines(item, templateContext = {}) {
+  const title = String(item?.title || "").trim();
+  if (!title) {
+    return [];
+  }
+  const content = resolveFrontmatterTemplateValue(item?.content, templateContext).trim();
+  const lines = [`## ${title}`, ""];
+  if (content) {
+    lines.push(content, "");
+  }
+  return lines;
+}
+
+function pushOptionalLines(targetLines, extraLines) {
+  if (!Array.isArray(extraLines) || !extraLines.length) {
+    return;
+  }
+  targetLines.push(...extraLines);
+}
+
 function resolveFrontmatterTemplateValue(value, templateContext = {}) {
   return String(value || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, rawKey) => {
     const key = String(rawKey || "").trim().toLowerCase();
@@ -4886,6 +4940,28 @@ function formatFixedPropertyYamlLine(key, type, value, templateContext = {}) {
   }
 
   return `${key}: "${escapeYaml(resolvedValue)}"`;
+}
+
+function normalizeNotePlaceholderSections(items) {
+  const allowedPositions = new Set(["before_intro", "before_chapters", "before_subtitle"]);
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .map((item) => {
+      const title = String(item?.title || "").trim();
+      const position = allowedPositions.has(String(item?.position || "").trim())
+        ? String(item?.position || "").trim()
+        : "before_intro";
+      const content = String(item?.content || "").trim();
+      return {
+        title,
+        position,
+        content
+      };
+    })
+    .filter((item) => item.title)
+    .slice(0, 5);
 }
 
 function buildSubtitleSectionLines(body, chapters, settings, withHours) {

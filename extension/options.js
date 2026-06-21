@@ -1,3 +1,9 @@
+const DEFAULT_PRESET_PROMPTS = [
+  "生成视频摘要和结论",
+  "按章节整理视频内容",
+  "生成带时间轴的笔记"
+];
+
 const DEFAULT_SETTINGS = {
   noteFolder: "Clippings/Bilibili",
   obsidianApiBaseUrl: "http://127.0.0.1:27123",
@@ -19,8 +25,15 @@ const DEFAULT_SETTINGS = {
     "tags"
   ],
   fixedFrontmatterProperties: [],
-  aiSystemPrompt: "结合字幕与评论理解视频，先给结论，再提炼重点，表达简洁，不要输出思考过程或 think 标签。",
-  aiPresetPrompts: []
+  notePlaceholderSections: [],
+  aiSystemPrompt: [
+    "你是一名专业的视频内容分析助手。基于字幕与评论提炼高价值信息，不要复述内容，不要输出思考过程或 think 标签。",
+    "优先输出：主题与核心观点、关键数据与事实、逻辑链路与重要结论、可执行建议。",
+    "回答应结构化、信息密度高、便于收藏和复习；自动过滤广告、废话和重复表达。",
+    "信息不足时明确说明，不得猜测或编造；涉及专业内容时，区分事实、数据、推测与作者观点。",
+    "输出时间戳时请使用普通正文格式，如 09:15、01:09:15，不要使用反引号、代码块或表格代码格式包裹时间戳。"
+  ].join("\n"),
+  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice()
 };
 
 const SYSTEM_FRONTMATTER_FIELDS = new Set(DEFAULT_SETTINGS.frontmatterFields.map((field) => String(field).toLowerCase()));
@@ -28,11 +41,14 @@ const CUSTOM_PROPERTY_KEY_PATTERN = /^[\p{L}\p{N}_\-\s]+$/u;
 const FIXED_PROPERTY_TYPES = new Set(["text", "number", "checkbox", "list", "date"]);
 const FRONTMATTER_TEMPLATE_TOKEN_RE = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/;
 const FRONTMATTER_DATE_VALUE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const NOTE_SECTION_POSITIONS = new Set(["before_intro", "before_chapters", "before_subtitle"]);
+const MAX_NOTE_PLACEHOLDER_SECTIONS = 5;
 
 const AI_PRESETS = [
   { id: "openai_compat", name: "OpenAI 兼容", baseUrl: "https://api.openai.com/v1", requiresKey: true },
   { id: "deepseek",      name: "DeepSeek",    baseUrl: "https://api.deepseek.com/v1", requiresKey: true },
   { id: "zhipu",         name: "智谱 GLM",    baseUrl: "https://open.bigmodel.cn/api/paas/v4", requiresKey: true },
+  { id: "minimax",       name: "MiniMax",     baseUrl: "https://api.minimaxi.com/v1", requiresKey: true },
   { id: "moonshot",      name: "Moonshot",    baseUrl: "https://api.moonshot.cn/v1", requiresKey: true },
   { id: "openrouter",    name: "OpenRouter",  baseUrl: "https://openrouter.ai/api/v1", requiresKey: true },
   { id: "ollama",        name: "Ollama (本地)", baseUrl: "http://localhost:11434/v1", requiresKey: false },
@@ -52,6 +68,9 @@ const elements = {
   fixedPropertiesList: document.getElementById("fixedPropertiesList"),
   fixedPropertiesEmpty: document.getElementById("fixedPropertiesEmpty"),
   addFixedPropertyBtn: document.getElementById("addFixedPropertyBtn"),
+  noteSectionsList: document.getElementById("noteSectionsList"),
+  noteSectionsEmpty: document.getElementById("noteSectionsEmpty"),
+  addNoteSectionBtn: document.getElementById("addNoteSectionBtn"),
   aiProvidersList: document.getElementById("aiProvidersList"),
   aiProvidersEmpty: document.getElementById("aiProvidersEmpty"),
   addAiProviderBtn: document.getElementById("addAiProviderBtn"),
@@ -70,6 +89,7 @@ function init() {
   elements.saveBtn.addEventListener("click", saveSettings);
   elements.testConnectionBtn.addEventListener("click", testConnection);
   elements.addFixedPropertyBtn.addEventListener("click", () => addFixedPropertyRow());
+  elements.addNoteSectionBtn.addEventListener("click", () => addNoteSectionRow());
   elements.addAiProviderBtn.addEventListener("click", () => addAiProviderRow());
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest(".fixed-property-type-picker")) {
@@ -96,6 +116,7 @@ async function loadSettings() {
     checkbox.checked = selectedFields.has(checkbox.value);
   });
   renderFixedPropertyRows(settings.fixedFrontmatterProperties);
+  renderNoteSectionRows(settings.notePlaceholderSections);
   elements.aiSystemPrompt.value = settings.aiSystemPrompt || "";
   savedAiPresetPrompts = Array.isArray(settings.aiPresetPrompts) ? settings.aiPresetPrompts : [];
 
@@ -127,6 +148,7 @@ async function saveSettings() {
       return;
     }
     renderFixedPropertyRows(payload.fixedFrontmatterProperties);
+    renderNoteSectionRows(payload.notePlaceholderSections);
 
     // AI 平台：list 走 sync、apiKey 走 local
     const aiResp = await sendRuntimeMessage({ type: "ai-providers-save", providers: aiProvidersPayload });
@@ -190,6 +212,7 @@ function collectFormPayload() {
     enableDebugLogs: elements.enableDebugLogs.checked,
     frontmatterFields: selectedFields,
     fixedFrontmatterProperties: normalizeFixedFrontmatterProperties(collectFixedPropertyRows()),
+    notePlaceholderSections: normalizeNotePlaceholderSections(collectNoteSectionRows()),
     aiSystemPrompt: String(elements.aiSystemPrompt?.value || "").trim(),
     aiPresetPrompts: Array.isArray(savedAiPresetPrompts) ? savedAiPresetPrompts.slice(0, 12) : []
   };
@@ -249,6 +272,11 @@ function validateSettings(payload, { requireApiKey }) {
     return fixedPropertyValidation;
   }
 
+  const noteSectionValidation = validateNotePlaceholderSections(collectNoteSectionRows({ includeRow: true }));
+  if (!noteSectionValidation.ok) {
+    return noteSectionValidation;
+  }
+
   return { ok: true };
 }
 
@@ -261,6 +289,31 @@ function applyValidationError(validation) {
   if (validation?.row) {
     const keyInput = validation.row.querySelector(".fixed-property-key");
     const valueInput = validation.row.querySelector(".fixed-property-value");
+    const titleInput = validation.row.querySelector(".note-section-title");
+    const contentInput = validation.row.querySelector(".note-section-content");
+    const positionSelect = validation.row.querySelector(".note-section-position");
+    const noteSectionErrorNode = validation.row.querySelector(".note-section-error");
+    if (titleInput || contentInput || positionSelect) {
+      if (titleInput && !String(titleInput.value || "").trim()) {
+        titleInput.classList.add("input-error");
+        titleInput.focus();
+      } else if (positionSelect && !NOTE_SECTION_POSITIONS.has(String(positionSelect.value || "").trim())) {
+        positionSelect.classList.add("input-error");
+        positionSelect.focus();
+      } else if (contentInput && validation.requireContent) {
+        contentInput.classList.add("input-error");
+        contentInput.focus();
+      } else if (titleInput) {
+        titleInput.classList.add("input-error");
+        titleInput.focus();
+      }
+      if (noteSectionErrorNode) {
+        noteSectionErrorNode.hidden = false;
+        noteSectionErrorNode.textContent = validation.message || "正文附加段落校验失败";
+      }
+      setStatus(validation?.message || "设置校验失败", true);
+      return;
+    }
     if (keyInput && !String(keyInput.value || "").trim()) {
       keyInput.classList.add("input-error");
       keyInput.focus();
@@ -286,6 +339,7 @@ function clearInputErrors() {
     input?.classList.remove("input-error");
   });
   clearFixedPropertyErrors();
+  clearNoteSectionErrors();
 }
 
 function renderFixedPropertyRows(items) {
@@ -387,6 +441,136 @@ function updateFixedPropertyEmptyState() {
   elements.fixedPropertiesEmpty.hidden = hasRows;
 }
 
+function renderNoteSectionRows(items) {
+  elements.noteSectionsList.innerHTML = "";
+  const rows = Array.isArray(items) ? items : [];
+  rows.forEach((item) => addNoteSectionRow(item, { skipLimit: true }));
+  updateNoteSectionEmptyState();
+}
+
+function addNoteSectionRow(item = {}, { skipLimit = false } = {}) {
+  if (!skipLimit && elements.noteSectionsList.children.length >= MAX_NOTE_PLACEHOLDER_SECTIONS) {
+    setStatus(`正文附加段落最多添加 ${MAX_NOTE_PLACEHOLDER_SECTIONS} 个`, true);
+    return;
+  }
+
+  const position = normalizeNoteSectionPosition(item.position);
+  const row = document.createElement("div");
+  row.className = "note-section-row";
+  row.innerHTML = `
+    <div class="note-section-fields">
+      <div class="note-section-field note-section-field-position">
+        <select class="note-section-position" aria-label="段落位置">
+          ${buildNoteSectionPositionOptions(position)}
+        </select>
+      </div>
+      <div class="note-section-field note-section-field-title">
+        <input class="note-section-title" type="text" placeholder="段落标题，例：总结" value="${escapeAttribute(item.title)}" />
+      </div>
+      <div class="note-section-field note-section-field-content">
+        <input class="note-section-content" type="text" placeholder="默认内容（可空）" value="${escapeAttribute(item.content)}" />
+      </div>
+      <div class="note-section-field note-section-field-remove">
+        <button class="note-section-remove" type="button" aria-label="删除段落" title="删除段落">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <path d="M4 7h16"></path>
+            <path d="M9 3h6"></path>
+            <path d="M10 11v6"></path>
+            <path d="M14 11v6"></path>
+            <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <p class="note-section-error" hidden></p>
+  `;
+
+  row.querySelector(".note-section-remove")?.addEventListener("click", () => {
+    row.remove();
+    updateNoteSectionEmptyState();
+  });
+
+  row.querySelectorAll(".note-section-title, .note-section-content, .note-section-position").forEach((input) => {
+    input.addEventListener("input", () => clearNoteSectionErrorState(row));
+    input.addEventListener("change", () => clearNoteSectionErrorState(row));
+  });
+
+  elements.noteSectionsList.appendChild(row);
+  updateNoteSectionEmptyState();
+}
+
+function updateNoteSectionEmptyState() {
+  const hasRows = elements.noteSectionsList.children.length > 0;
+  elements.noteSectionsEmpty.hidden = hasRows;
+}
+
+function collectNoteSectionRows({ includeRow = false } = {}) {
+  return Array.from(elements.noteSectionsList.querySelectorAll(".note-section-row")).map((row) => {
+    const item = {
+      title: String(row.querySelector(".note-section-title")?.value || "").trim(),
+      position: normalizeNoteSectionPosition(row.querySelector(".note-section-position")?.value),
+      content: String(row.querySelector(".note-section-content")?.value || "").trim()
+    };
+    if (includeRow) {
+      item.row = row;
+    }
+    return item;
+  });
+}
+
+function validateNotePlaceholderSections(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (rows.length > MAX_NOTE_PLACEHOLDER_SECTIONS) {
+    return { ok: false, message: `正文附加段落最多添加 ${MAX_NOTE_PLACEHOLDER_SECTIONS} 个` };
+  }
+  for (const item of rows) {
+    const title = String(item?.title || "").trim();
+    const position = normalizeNoteSectionPosition(item?.position);
+    const content = String(item?.content || "").trim();
+    if (!title && !content) {
+      continue;
+    }
+    if (!title) {
+      return { ok: false, row: item.row, message: "请填写段落标题" };
+    }
+    if (!NOTE_SECTION_POSITIONS.has(position)) {
+      return { ok: false, row: item.row, message: "请选择有效的位置" };
+    }
+  }
+  return { ok: true };
+}
+
+function normalizeNotePlaceholderSections(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .map((item) => ({
+      title: String(item?.title || "").trim(),
+      position: normalizeNoteSectionPosition(item?.position),
+      content: String(item?.content || "").trim()
+    }))
+    .filter((item) => item.title)
+    .slice(0, MAX_NOTE_PLACEHOLDER_SECTIONS);
+}
+
+function normalizeNoteSectionPosition(value) {
+  const key = String(value || "").trim().toLowerCase();
+  return NOTE_SECTION_POSITIONS.has(key) ? key : "before_intro";
+}
+
+function buildNoteSectionPositionOptions(selectedPosition) {
+  const current = normalizeNoteSectionPosition(selectedPosition);
+  const options = [
+    { value: "before_intro", label: "简介前" },
+    { value: "before_chapters", label: "章节前" },
+    { value: "before_subtitle", label: "字幕前" }
+  ];
+  return options
+    .map((item) => `<option value="${item.value}" ${item.value === current ? "selected" : ""}>${item.label}</option>`)
+    .join("");
+}
+
 function collectFixedPropertyRows({ includeRow = false } = {}) {
   return Array.from(elements.fixedPropertiesList.querySelectorAll(".fixed-property-row")).map((row) => {
     const type = normalizeFixedPropertyType(row.querySelector(".fixed-property-type-picker")?.getAttribute("data-type"));
@@ -468,6 +652,16 @@ function clearFixedPropertyErrors() {
     input.classList.remove("input-error");
   });
   elements.fixedPropertiesList.querySelectorAll(".fixed-property-error").forEach((node) => {
+    node.hidden = true;
+    node.textContent = "";
+  });
+}
+
+function clearNoteSectionErrors() {
+  elements.noteSectionsList.querySelectorAll(".note-section-title, .note-section-content, .note-section-position").forEach((input) => {
+    input.classList.remove("input-error");
+  });
+  elements.noteSectionsList.querySelectorAll(".note-section-error").forEach((node) => {
     node.hidden = true;
     node.textContent = "";
   });
@@ -577,6 +771,17 @@ function clearFixedPropertyErrorState(row) {
     input.classList.remove("input-error");
   });
   const errorNode = row.querySelector(".fixed-property-error");
+  if (errorNode) {
+    errorNode.hidden = true;
+    errorNode.textContent = "";
+  }
+}
+
+function clearNoteSectionErrorState(row) {
+  row.querySelectorAll(".note-section-title, .note-section-content, .note-section-position").forEach((input) => {
+    input.classList.remove("input-error");
+  });
+  const errorNode = row.querySelector(".note-section-error");
   if (errorNode) {
     errorNode.hidden = true;
     errorNode.textContent = "";
@@ -772,10 +977,7 @@ function addAiProviderRow(item = {}) {
       model
     });
     if (resp?.ok) {
-      const modelsText = Array.isArray(resp.models) && resp.models.length
-        ? `（已列出 ${resp.models.length} 个模型）`
-        : "";
-      showAiProviderStatus(statusNode, `连接成功${modelsText}`);
+      showAiProviderStatus(statusNode, "连接成功");
     } else {
       showAiProviderStatus(statusNode, `失败：${resp?.error || "未知错误"}`, true);
     }

@@ -99,15 +99,23 @@
 
       <section class="field-group property-editor">
         <h2>自定义属性</h2>
-        <p class="hint">支持默认属性的变量映射，比如 `{{upload_date}}`、`{{created}}`、`{{tags}}`</p>
+        <p class="hint">支持默认属性的变量映射，比如 `{{upload_date}}`、`{{created}}`</p>
         <div id="fixedPropertiesList" class="fixed-properties-list"></div>
         <p id="fixedPropertiesEmpty" class="fixed-properties-empty">还没有自定义属性</p>
         <button id="addFixedPropertyBtn" class="add-property-btn" type="button">+ 添加属性</button>
       </section>
 
+      <section class="field-group property-editor">
+        <h2>正文附加段落</h2>
+        <p class="hint">在正文插入占位段落标题。默认结构：简介-章节-字幕；具体内容可留空。</p>
+        <div id="noteSectionsList" class="note-sections-list"></div>
+        <p id="noteSectionsEmpty" class="fixed-properties-empty">还没有正文附加段落</p>
+        <button id="addNoteSectionBtn" class="add-property-btn" type="button">+ 添加段落</button>
+      </section>
+
       <section class="field-group">
         <h2>AI 模型平台</h2>
-        <p class="hint">支持 OpenAI 兼容协议（OpenAI / DeepSeek / 智谱 / Moonshot / OpenRouter / Ollama 等）。</p>
+        <p class="hint">支持 OpenAI 兼容协议（OpenAI / DeepSeek / 智谱 / MiniMax / Moonshot / OpenRouter / Ollama 等）。</p>
         <div id="aiProvidersList" class="ai-providers-list"></div>
         <p id="aiProvidersEmpty" class="ai-providers-empty">还没有配置平台，点击下方按钮添加。</p>
         <button id="addAiProviderBtn" class="add-property-btn" type="button">+ 添加平台</button>

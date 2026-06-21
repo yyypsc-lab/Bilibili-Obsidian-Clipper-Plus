@@ -3,8 +3,16 @@ import { buildSuggestedPrompts } from "./ai/context.js";
 const SELECTED_PROVIDER_KEY = "boc_ai_selected_provider";
 const CONVERSATIONS_STORAGE_KEY = "boc_ai_conversations_v1";
 const MAX_SAVED_CONVERSATIONS = 60;
+const NON_VIDEO_CONTEXT_MESSAGE = "当前页非 B 站视频页面，<br>无法获取当前页面信息作为对话上下文，<br>仅支持 AI 对话。";
+const DEFAULT_PRESET_PROMPTS = [
+  "生成视频摘要和结论",
+  "按章节整理视频内容",
+  "生成带时间轴的笔记"
+];
+const STREAM_SLOW_NOTICE_MS = 15000;
 
 const els = {
+  header: document.querySelector(".sp-header"),
   contextChip: document.getElementById("spContextChip"),
   refreshBtn: document.getElementById("spRefreshBtn"),
   modelSelect: document.getElementById("spModelSelect"),
@@ -18,13 +26,15 @@ const els = {
   presetAddBtn: document.getElementById("spPresetAddBtn"),
   historyPopover: document.getElementById("spHistoryPopover"),
   historyList: document.getElementById("spHistoryList"),
+  historyClearBtn: document.getElementById("spHistoryClearBtn"),
   messages: document.getElementById("spMessages"),
   input: document.getElementById("spInput"),
+  stopBtn: document.getElementById("spStopBtn"),
 };
 
 const DEFAULT_AI_PREFS = {
   aiSystemPrompt: "",
-  aiPresetPrompts: []
+  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice()
 };
 
 let contextData = null;
@@ -46,6 +56,9 @@ let contextNoticeTimer = 0;
 let shouldAutoScrollMessages = true;
 let liveContextSyncTimer = 0;
 let liveContextSyncForceRefresh = false;
+let modelSelectMeasureCanvas = null;
+let streamSlowNoticeTimer = 0;
+let streamFirstTokenReceived = false;
 
 init().catch((err) => {
   resetConversationView(`初始化失败：${escapeHtml(err?.message || err)}`);
@@ -82,6 +95,12 @@ function bindEvents() {
   els.refreshBtn.addEventListener("click", () => refreshContextManually());
   els.presetBtn.addEventListener("click", togglePresetPopover);
   els.historyBtn.addEventListener("click", toggleHistoryPopover);
+  els.historyClearBtn?.addEventListener("click", () => {
+    void clearAllConversations();
+  });
+  els.stopBtn?.addEventListener("click", () => {
+    stopActiveStream();
+  });
   els.presetAddBtn.addEventListener("click", addPresetPrompt);
   els.presetInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -93,7 +112,9 @@ function bindEvents() {
     if (els.modelSelect.value) {
       localStorage.setItem(SELECTED_PROVIDER_KEY, els.modelSelect.value);
     }
+    updateModelSelectWidth();
   });
+  window.addEventListener("resize", updateModelSelectWidth);
   document.addEventListener("click", handleDocumentClick);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
@@ -120,7 +141,17 @@ function bindEvents() {
 function autosizeInput() {
   els.input.style.height = "auto";
   const next = Math.min(els.input.scrollHeight, 320);
-  els.input.style.height = `${Math.max(next, 94)}px`;
+  const minHeight = document.body.classList.contains("sp-non-video-context") ? 72 : 94;
+  els.input.style.height = `${Math.max(next, minHeight)}px`;
+}
+
+function setStreamingUiState(isStreaming, { stopping = false } = {}) {
+  els.input.disabled = isStreaming;
+  if (els.stopBtn) {
+    els.stopBtn.hidden = !isStreaming;
+    els.stopBtn.disabled = stopping;
+    els.stopBtn.textContent = stopping ? "停止中..." : "停止";
+  }
 }
 
 async function loadProvidersAndPrefs() {
@@ -137,6 +168,10 @@ async function loadProvidersAndPrefs() {
       ? settingsResp.settings.aiPresetPrompts.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 12)
       : []
   };
+  if (!aiPrefs.aiPresetPrompts.length) {
+    aiPrefs.aiPresetPrompts = DEFAULT_PRESET_PROMPTS.slice();
+    void persistAiPresetPrompts();
+  }
   renderModelSelect();
   renderPresetPrompts();
 }
@@ -145,6 +180,7 @@ function renderModelSelect() {
   if (!providers.length) {
     els.modelSelect.innerHTML = '<option value="">未配置平台</option>';
     els.modelSelect.disabled = true;
+    els.modelSelect.style.width = "96px";
     return;
   }
 
@@ -159,6 +195,58 @@ function renderModelSelect() {
   const matchedProvider = providers.find((item) => item.id === savedProviderId) || providers[0];
   els.modelSelect.value = matchedProvider?.id || "";
   els.modelSelect.disabled = false;
+  updateModelSelectWidth();
+}
+
+function updateModelSelectWidth() {
+  if (!els.modelSelect) {
+    return;
+  }
+  const selectedOption = els.modelSelect.options[els.modelSelect.selectedIndex];
+  const text = String(selectedOption?.textContent || "").trim() || "未配置平台";
+  const computedStyle = window.getComputedStyle(els.modelSelect);
+  const measuredTextWidth = measureTextWidth(text, computedStyle);
+  const extraCharsWidth = measureTextWidth("000", computedStyle);
+  const desiredWidth = Math.ceil(measuredTextWidth + extraCharsWidth + 36);
+  const minWidth = 92;
+  const maxWidth = getModelSelectMaxWidth();
+  const nextWidth = Math.max(minWidth, Math.min(desiredWidth, maxWidth));
+  els.modelSelect.style.width = `${nextWidth}px`;
+}
+
+function measureTextWidth(text, style) {
+  if (!modelSelectMeasureCanvas) {
+    modelSelectMeasureCanvas = document.createElement("canvas");
+  }
+  const ctx = modelSelectMeasureCanvas.getContext("2d");
+  if (!ctx) {
+    return text.length * 8;
+  }
+  const fontStyle = style?.fontStyle || "normal";
+  const fontVariant = style?.fontVariant || "normal";
+  const fontWeight = style?.fontWeight || "400";
+  const fontSize = style?.fontSize || "11px";
+  const fontFamily = style?.fontFamily || "sans-serif";
+  ctx.font = `${fontStyle} ${fontVariant} ${fontWeight} ${fontSize} ${fontFamily}`;
+  return ctx.measureText(text).width;
+}
+
+function getModelSelectMaxWidth() {
+  const header = els.header;
+  if (!header || !els.contextChip || !els.refreshBtn || !els.settingsBtn) {
+    return 172;
+  }
+  const style = window.getComputedStyle(header);
+  const gap = Number.parseFloat(style.columnGap || style.gap || "0") || 0;
+  const paddingLeft = Number.parseFloat(style.paddingLeft || "0") || 0;
+  const paddingRight = Number.parseFloat(style.paddingRight || "0") || 0;
+  const contentWidth = header.clientWidth - paddingLeft - paddingRight;
+  const siblingWidth =
+    els.contextChip.offsetWidth +
+    els.refreshBtn.offsetWidth +
+    els.settingsBtn.offsetWidth +
+    gap * 3;
+  return Math.max(92, Math.floor(contentWidth - siblingWidth));
 }
 
 async function loadContextState({ forceRefresh = false, silent = false } = {}) {
@@ -203,11 +291,13 @@ async function loadContextState({ forceRefresh = false, silent = false } = {}) {
   liveContextData = resp.payload;
   liveContextKey = buildContextKey(resp.payload);
   if (hasPinnedConversation) {
+    renderHistoryList();
     updateContextChip();
     return true;
   }
 
   const contextChanged = applyContextPayload(resp.payload);
+  renderHistoryList();
   if (contextChanged) {
     await restoreLatestConversationForCurrentContext();
     renderInitialState();
@@ -313,6 +403,7 @@ async function openCurrentContextUrl() {
 }
 
 function renderInitialState() {
+  updateSidepanelLayoutState();
   if (!contextData) {
     resetConversationView("当前页面不是 B 站视频页，无法读取视频信息。");
     return;
@@ -329,10 +420,15 @@ function renderInitialState() {
     renderConversationMessages();
     return;
   }
+  if (contextData.isVideoContext === false) {
+    resetConversationView(NON_VIDEO_CONTEXT_MESSAGE);
+    return;
+  }
   resetConversationView("");
 }
 
 function resetConversationView(stateHtml = "") {
+  updateSidepanelLayoutState();
   els.messages.innerHTML = "";
   if (stateHtml) {
     const stateNode = document.createElement("div");
@@ -354,7 +450,7 @@ function renderSuggestions() {
   if (!suggestionsNode) {
     return;
   }
-  if (!contextData || !providers.length || chatHistory.length) {
+  if (!contextData || !providers.length || chatHistory.length || contextData.isVideoContext === false) {
     suggestionsNode.innerHTML = "";
     return;
   }
@@ -407,18 +503,34 @@ function renderHistoryList() {
   if (!els.historyList) {
     return;
   }
+  if (els.historyClearBtn) {
+    els.historyClearBtn.hidden = savedConversations.length === 0;
+  }
   if (!savedConversations.length) {
     els.historyList.innerHTML = '<span class="sp-history-empty">还没有历史对话</span>';
     return;
   }
 
+  const liveVideoRef = liveContextData?.isVideoContext ? liveContextData : null;
+  const canHighlightLiveMatches = Boolean(
+    liveVideoRef &&
+    currentConversationMeta?.pinnedContext &&
+    currentConversationMeta?.contextUrl &&
+    !doesTabMatchContextUrl(liveVideoRef.url || liveTabUrl, currentConversationMeta.contextUrl || "")
+  );
+
   els.historyList.innerHTML = savedConversations
     .map((conversation) => {
       const isActive = conversation.id === currentConversationId;
-      const metaText = formatConversationTimestamp(conversation.createdAt);
+      const isLiveMatch = Boolean(
+        !isActive &&
+        canHighlightLiveMatches &&
+        doesConversationMatchCurrentContext(conversation, liveVideoRef, liveContextKey)
+      );
+      const metaText = formatConversationTimestamp(conversation.updatedAt || conversation.createdAt);
       const titleDisplay = buildConversationTitleDisplay(conversation.title, 30);
       return `
-        <div class="sp-history-item ${isActive ? "is-active" : ""}" data-id="${escapeHtml(conversation.id)}">
+        <div class="sp-history-item ${isActive ? "is-active" : ""} ${isLiveMatch ? "is-live-match" : ""}" data-id="${escapeHtml(conversation.id)}">
           <button type="button" class="sp-history-open" data-id="${escapeHtml(conversation.id)}">
             <span class="sp-history-title" title="${escapeHtml(conversation.title)}">
               <span class="sp-history-title-main">${escapeHtml(titleDisplay.main)}</span>
@@ -646,6 +758,7 @@ function applyConversation(conversation) {
     id: conversation.id,
     title: conversation.title,
     createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
     contextKey: conversation.contextKey,
     contextTitle: conversation.contextTitle,
     contextUrl: conversation.contextUrl,
@@ -692,6 +805,27 @@ async function deleteConversation(id) {
   currentConversationId = "";
   currentConversationMeta = null;
   chatHistory = [];
+  if (liveContextData) {
+    contextData = { ...liveContextData };
+    currentContextKey = liveContextKey || buildContextKey(liveContextData);
+    updateContextChip();
+  }
+  renderInitialState();
+}
+
+async function clearAllConversations() {
+  if (!savedConversations.length) {
+    return;
+  }
+  if (!confirm("确定要清空全部历史对话吗？")) {
+    return;
+  }
+  savedConversations = [];
+  currentConversationId = "";
+  currentConversationMeta = null;
+  chatHistory = [];
+  await saveConversations();
+  hideHistoryPopover();
   if (liveContextData) {
     contextData = { ...liveContextData };
     currentContextKey = liveContextKey || buildContextKey(liveContextData);
@@ -822,6 +956,19 @@ async function persistAiPresetPrompts() {
   await sendRuntimeMessage({ type: "save-settings", settings: nextSettings }).catch(() => null);
 }
 
+function updateSidepanelLayoutState() {
+  const useCompactInput = Boolean(
+    contextData &&
+    contextData.isVideoContext === false &&
+    !chatHistory.length &&
+    !currentConversationMeta?.pinnedContext
+  );
+  document.body.classList.toggle("sp-non-video-context", useCompactInput);
+  if (els.input) {
+    autosizeInput();
+  }
+}
+
 async function refreshContextManually() {
   if (els.refreshBtn.disabled) {
     return;
@@ -843,7 +990,12 @@ async function refreshContextManually() {
 
 function setRefreshing(isRefreshing) {
   els.refreshBtn.disabled = isRefreshing;
-  els.refreshBtn.textContent = isRefreshing ? "…" : "↻";
+  els.refreshBtn.classList.toggle("is-loading", isRefreshing);
+  if (isRefreshing) {
+    els.refreshBtn.setAttribute("aria-busy", "true");
+  } else {
+    els.refreshBtn.removeAttribute("aria-busy");
+  }
 }
 
 async function startNewConversation() {
@@ -865,6 +1017,7 @@ async function startNewConversation() {
 }
 
 function renderConversationMessages() {
+  updateSidepanelLayoutState();
   els.messages.innerHTML = "";
   suggestionsNode = null;
   if (!chatHistory.length) {
@@ -1070,6 +1223,7 @@ async function persistCurrentConversation() {
     id: nextConversation.id,
     title: nextConversation.title,
     createdAt: nextConversation.createdAt,
+    updatedAt: nextConversation.updatedAt,
     contextKey: nextConversation.contextKey,
     contextTitle: nextConversation.contextTitle,
     contextUrl: nextConversation.contextUrl,
@@ -1201,9 +1355,11 @@ async function sendMessage() {
   appendUserMessage(text);
   els.input.value = "";
   autosizeInput();
-  els.input.disabled = true;
+  setStreamingUiState(true);
   activeUserPrompt = text;
   activeAssistantNode = appendAssistantPlaceholder();
+  startStreamSlowNoticeTimer();
+  streamFirstTokenReceived = false;
 
   activePort = chrome.runtime.connect({ name: "sidepanel-chat" });
   activePort.onMessage.addListener((msg) => {
@@ -1211,15 +1367,19 @@ async function sendMessage() {
       return;
     }
     if (msg.type === "token") {
+      handleFirstStreamToken();
       appendToken(activeAssistantNode, msg.data);
     } else if (msg.type === "done") {
       finalizeAssistant(activeAssistantNode);
+    } else if (msg.type === "stopped") {
+      handleAssistantStopped(activeAssistantNode, msg.reason || "已停止生成");
     } else if (msg.type === "error") {
       showAssistantError(activeAssistantNode, msg.error || "未知错误");
     }
   });
   activePort.onDisconnect.addListener(() => {
-    els.input.disabled = false;
+    clearStreamRuntimeState();
+    setStreamingUiState(false);
     activePort = null;
   });
 
@@ -1273,6 +1433,7 @@ function finalizeAssistant(node) {
   if (!node) {
     return;
   }
+  clearStreamRuntimeState();
   const raw = node.dataset.raw || "";
   renderAssistantMessage(node, raw);
   if (activeUserPrompt && raw) {
@@ -1287,7 +1448,7 @@ function finalizeAssistant(node) {
     } catch {}
     activePort = null;
   }
-  els.input.disabled = false;
+  setStreamingUiState(false);
   els.input.focus();
   scrollToBottom();
 }
@@ -1296,6 +1457,7 @@ function showAssistantError(node, error) {
   if (!node) {
     return;
   }
+  clearStreamRuntimeState();
   node.innerHTML = "";
   const err = document.createElement("div");
   err.className = "sp-msg-error";
@@ -1308,9 +1470,91 @@ function showAssistantError(node, error) {
     } catch {}
     activePort = null;
   }
-  els.input.disabled = false;
+  setStreamingUiState(false);
   els.input.focus();
   scrollToBottom();
+}
+
+function handleAssistantStopped(node, reason) {
+  if (!node) {
+    return;
+  }
+  clearStreamRuntimeState();
+  const raw = String(node.dataset.raw || "");
+  if (raw.trim()) {
+    renderAssistantMessage(node, raw);
+    const stopped = document.createElement("div");
+    stopped.className = "sp-msg-stopped";
+    stopped.textContent = reason || "已停止生成";
+    node.appendChild(stopped);
+    if (activeUserPrompt) {
+      chatHistory.push({ role: "user", content: activeUserPrompt });
+      chatHistory.push({ role: "assistant", content: raw });
+      activeUserPrompt = "";
+      void persistCurrentConversation();
+    }
+  } else {
+    node.innerHTML = "";
+    const stopped = document.createElement("div");
+    stopped.className = "sp-msg-stopped";
+    stopped.textContent = reason || "已停止生成";
+    node.appendChild(stopped);
+    activeUserPrompt = "";
+  }
+  if (activePort) {
+    try {
+      activePort.disconnect();
+    } catch {}
+    activePort = null;
+  }
+  setStreamingUiState(false);
+  els.input.focus();
+  scrollToBottom();
+}
+
+function stopActiveStream() {
+  if (!activePort) {
+    return;
+  }
+  if (els.stopBtn) {
+    els.stopBtn.disabled = true;
+    els.stopBtn.textContent = "停止中...";
+  }
+  try {
+    activePort.postMessage({ action: "stop" });
+  } catch {
+    try {
+      activePort.disconnect();
+    } catch {}
+  }
+}
+
+function startStreamSlowNoticeTimer() {
+  clearStreamRuntimeState();
+  streamFirstTokenReceived = false;
+  streamSlowNoticeTimer = window.setTimeout(() => {
+    if (!activePort || streamFirstTokenReceived) {
+      return;
+    }
+    showConversationContextNotice("模型响应较慢，仍在等待服务器返回...", 0);
+  }, STREAM_SLOW_NOTICE_MS);
+}
+
+function handleFirstStreamToken() {
+  if (streamFirstTokenReceived) {
+    return;
+  }
+  streamFirstTokenReceived = true;
+  clearStreamRuntimeState();
+}
+
+function clearStreamRuntimeState() {
+  if (streamSlowNoticeTimer) {
+    window.clearTimeout(streamSlowNoticeTimer);
+    streamSlowNoticeTimer = 0;
+  }
+  streamFirstTokenReceived = false;
+  removeConversationContextNotice();
 }
 
 function renderAssistantMessage(node, raw) {
@@ -1543,6 +1787,7 @@ function formatSecondsAsTimestamp(seconds) {
 }
 
 function restartChat({ keepContext = false } = {}) {
+  clearStreamRuntimeState();
   if (activePort) {
     try {
       activePort.disconnect();
@@ -1560,7 +1805,7 @@ function restartChat({ keepContext = false } = {}) {
   }
   updateContextChip();
   resetConversationView("");
-  els.input.disabled = false;
+  setStreamingUiState(false);
   els.input.value = "";
   autosizeInput();
 }
