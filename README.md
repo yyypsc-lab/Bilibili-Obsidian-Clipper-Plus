@@ -88,7 +88,7 @@
 
 如果这个项目对您有帮助，欢迎微信打赏支持我的开发工作。您的支持是我持续改进和维护这个项目的动力。
 
-<img src="docs/images/weixin.jpg" alt="微信扫码支持开发者" width="220" />
+<img src="docs/images/weixin.jpg" alt="微信扫码支持开发者" width="264" />
 
 ## 免责声明
 
