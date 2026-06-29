@@ -1,21 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "Bilibili Obsidian Clipper｜一键保存B站字幕",
-  "version": "1.1.0",
-  "description": "在 B 站视频页抓取字幕，预览后一键保存到 Obsidian。",
-  
+  "name": "Bilibili Obsidian Clipper Local Transcribe",
+  "version": "1.2.0",
+  "description": "Capture Bilibili subtitles and generate local Whisper transcriptions when subtitle tracks are unavailable.",
   "browser_specific_settings": {
     "gecko": {
       "id": "bilibili-obsidian-clipper@github.com",
       "strict_min_version": "109.0"
     }
   },
-  
   "permissions": ["storage", "scripting", "sidePanel"],
   "host_permissions": [
     "https://www.bilibili.com/*",
     "https://api.bilibili.com/*",
     "https://*.hdslb.com/*",
+    "https://*.bilivideo.com/*",
     "http://127.0.0.1/*",
     "https://127.0.0.1/*",
     "http://localhost/*",
@@ -49,7 +48,7 @@
     }
   ],
   "action": {
-    "default_title": "Bilibili Obsidian Clipper",
+    "default_title": "Bilibili Obsidian Clipper Local Transcribe",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"

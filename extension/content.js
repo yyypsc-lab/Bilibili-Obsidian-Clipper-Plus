@@ -26,7 +26,18 @@ const DEFAULT_SETTINGS = {
     "tags"
   ],
   fixedFrontmatterProperties: [],
-  notePlaceholderSections: []
+  notePlaceholderSections: [],
+  transcriptionEnabled: true,
+  transcriptionProviderType: "whisper",
+  transcriptionBaseUrl: "http://127.0.0.1:8765/v1",
+  transcriptionModel: "whisper-1",
+  transcriptionLanguage: "zh",
+  transcriptionMaxDurationSeconds: 3600,
+  transcriptionUseFfmpeg: false,
+  transcriptionFfmpegEndpoint: "http://127.0.0.1:9000/ffmpeg/convert",
+  transcriptionFfmpegFormat: "mp3",
+  transcriptionKeepAudio: false,
+  transcriptionAudioCacheDir: ""
 };
 
 const BOC_VERSION = "1.1.0";
@@ -53,6 +64,11 @@ const state = {
   selectedSubtitleLang: "",
   subtitleBody: [],
   subtitleFetchState: "idle",
+  subtitleSource: "none",
+  generatedSubtitleStatus: "idle",
+  generatedSubtitleError: "",
+  generatedSubtitleProvider: "",
+  generatedAudioPath: "",
   chapters: [],
   markdown: "",
   srt: "",
@@ -309,6 +325,7 @@ const ids = {
   downloadBtn: "boc-download-btn",
   sendBtn: "boc-send-btn",
   refreshBtn: "boc-refresh-btn",
+  generateTranscriptBtn: "boc-generate-transcript-btn",
   closeBtn: "boc-close-btn",
   settingsBtn: "boc-settings-btn",
   readingView: "boc-reading-view",
@@ -411,10 +428,27 @@ function bindRuntimeEvents() {
       return true;
     }
 
+    if (message.type === "popup-generate-transcription") {
+      generateTranscriptionSubtitle(Boolean(message.force))
+        .then(() => sendResponse({ ok: true, payload: getPopupPayload() }))
+        .catch((error) => sendResponse({ ok: false, error: getErrorMessage(error), payload: getPopupPayload() }));
+      return true;
+    }
+    if (message.type === "popup-delete-transcription-audio") {
+      deleteGeneratedAudio()
+        .then(() => sendResponse({ ok: true, payload: getPopupPayload() }))
+        .catch((error) => sendResponse({ ok: false, error: getErrorMessage(error), payload: getPopupPayload() }));
+      return true;
+    }
+
     if (message.type === "popup-select-subtitle") {
       const url = String(message.url || "").trim();
       const lang = String(message.lang || "unknown");
       const subtitleId = String(message.subtitleId || "");
+      if (subtitleId === "generated-asr") {
+        sendResponse({ ok: true, payload: getPopupPayload() });
+        return false;
+      }
       if (!url) {
         sendResponse({ ok: false, error: "Missing subtitle URL", payload: getPopupPayload() });
         return false;
@@ -578,6 +612,8 @@ function buildUiHtml() {
         <option value="">暂无字幕</option>
       </select>
 
+      <button id="${ids.generateTranscriptBtn}" type="button" class="boc-generate-transcript" hidden>生成转写字幕</button>
+
       <label class="boc-label" for="${ids.preview}">字幕预览</label>
       <textarea id="${ids.preview}" readonly></textarea>
 
@@ -697,6 +733,7 @@ function bindUiEvents() {
   const panel = byId(ids.panel);
   const closeBtn = byId(ids.closeBtn);
   const refreshBtn = byId(ids.refreshBtn);
+  const generateTranscriptBtn = document.getElementById(ids.generateTranscriptBtn);
   const select = byId(ids.subtitleSelect);
   const copyBtn = byId(ids.copyBtn);
   const downloadBtn = byId(ids.downloadBtn);
@@ -718,6 +755,7 @@ function bindUiEvents() {
 
   closeBtn.addEventListener("click", () => panel.classList.remove("open"));
   refreshBtn.addEventListener("click", refreshClip);
+  generateTranscriptBtn?.addEventListener("click", () => generateTranscriptionSubtitle(true));
   select.addEventListener("change", onSubtitleChange);
   copyBtn.addEventListener("click", copyMarkdown);
   downloadBtn.addEventListener("click", downloadSubtitle);
@@ -885,6 +923,11 @@ function resetClipState() {
   state.selectedSubtitleLang = "";
   state.subtitleBody = [];
   state.subtitleFetchState = "idle";
+  state.subtitleSource = "none";
+  state.generatedSubtitleStatus = "idle";
+  state.generatedSubtitleError = "";
+  state.generatedSubtitleProvider = "";
+  state.generatedAudioPath = "";
   state.chapters = [];
   state.markdown = "";
   state.srt = "";
@@ -982,7 +1025,7 @@ async function refreshClip() {
       cid: state.cid,
       cidSource: state.cidSource,
       pageIndex: resolvedPageIndex,
-      videoDuration: state.videoDuration
+      videoDuration: state.videoDuration,
     });
 
     setStatus("正在获取可用字幕...");
@@ -1015,6 +1058,7 @@ async function refreshClip() {
     // 无字幕时也允许进入阅读视图，只是字幕区域保持空态。
     if (state.subtitles.length === 0) {
       applyNoSubtitleState();
+      const restoredGenerated = await restoreGeneratedSubtitleFromCache();
       renderMeta();
       renderSubtitleSelect();
       if (state.readingViewOpen) {
@@ -1025,7 +1069,7 @@ async function refreshClip() {
         startReaderPlayerObserver();
         syncReadingViewPlayback(true);
       }
-      setStatus("当前视频无字幕。");
+      setStatus(restoredGenerated ? "已从缓存恢复转写字幕。" : "当前视频无字幕。");
       return;
     }
 
@@ -1040,6 +1084,7 @@ async function refreshClip() {
 
     if (!preferred) {
       applyNoSubtitleState();
+      const restoredGenerated = await restoreGeneratedSubtitleFromCache();
       renderMeta();
       renderSubtitleSelect();
       if (state.readingViewOpen) {
@@ -1050,7 +1095,7 @@ async function refreshClip() {
         startReaderPlayerObserver();
         syncReadingViewPlayback(true);
       }
-      setStatus("当前视频无字幕。");
+      setStatus(restoredGenerated ? "已从缓存恢复转写字幕。" : "当前视频无字幕。");
       return;
     }
 
@@ -1132,6 +1177,9 @@ async function onSubtitleChange(event) {
   const option = event.target.options[event.target.selectedIndex];
   const lang = option?.dataset.lang || "unknown";
   const subtitleId = option?.dataset.id || "";
+  if (subtitleId === "generated-asr") {
+    return;
+  }
   if (!value) {
     return;
   }
@@ -1304,6 +1352,167 @@ async function clearSubtitleCache(bvid, cid, lang) {
   }
 }
 
+async function restoreGeneratedSubtitleFromCache() {
+  if (!state.bvid || !state.cid) return false;
+  const cached = await loadGeneratedSubtitleFromCache(getGeneratedSubtitleCacheKey());
+  if (!cached?.body?.length) return false;
+  applyGeneratedSubtitleState(cached.body, cached);
+  setMessage("已使用本地缓存的转写字幕，无需重新生成。");
+  return true;
+}
+async function generateTranscriptionSubtitle(force = false) {
+  if (!state.bvid || !state.cid) {
+    throw new Error("请先刷新抓取视频信息。");
+  }
+  state.settings = await getSettings();
+  if (state.settings.transcriptionEnabled === false) {
+    throw new Error("无字幕轨转写功能未启用，请先在设置中开启。");
+  }
+
+  const cacheKey = getGeneratedSubtitleCacheKey();
+  if (!force) {
+    const cached = await loadGeneratedSubtitleFromCache(cacheKey);
+    if (cached?.body?.length) {
+      applyGeneratedSubtitleState(cached.body, cached);
+      return;
+    }
+  }
+
+  setBusyState(true);
+  state.generatedSubtitleStatus = "transcribing";
+  state.generatedSubtitleError = "";
+  setStatus("正在生成转写字幕，可能需要几分钟...");
+  setMessage("插件会临时获取音频并提交到你配置的 Whisper-compatible 服务。");
+  updateGeneratedTranscriptionControls();
+  try {
+    const resp = await sendRuntimeMessage({
+      type: "generate-transcription-subtitle",
+      bvid: state.bvid,
+      cid: state.cid,
+      aid: state.aid,
+      videoDuration: state.videoDuration,
+      force: Boolean(force)
+    });
+    if (!resp?.ok) {
+      throw new Error(toReadableText(resp?.error, "转写失败"));
+    }
+    const result = resp.result || {};
+    const body = Array.isArray(result.body) ? result.body : [];
+    if (!body.length) {
+      throw new Error("转写服务没有返回可用字幕。");
+    }
+    applyGeneratedSubtitleState(body, result);
+    await saveGeneratedSubtitleToCache(cacheKey, {
+      body,
+      provider: result.provider || "whisper",
+      model: result.model || state.settings.transcriptionModel || "",
+      language: result.language || state.settings.transcriptionLanguage || "",
+      createdAt: Date.now(),
+      videoDuration: state.videoDuration,
+      audioPath: result.audioPath || ""
+    });
+    setStatus("转写字幕生成完成，可以复制、下载或发送到 Obsidian。");
+    setMessage("转写字幕由 ASR 生成，不是 B 站官方字幕轨。");
+  } catch (error) {
+    state.generatedSubtitleStatus = "error";
+    state.generatedSubtitleError = getErrorMessage(error);
+    updateGeneratedTranscriptionControls();
+    setStatus(`转写失败：${getErrorMessage(error)}`);
+    throw error;
+  } finally {
+    setBusyState(false);
+  }
+}
+
+function applyGeneratedSubtitleState(body, meta = {}) {
+  state.subtitleSource = "generated-asr";
+  state.generatedSubtitleStatus = "ready";
+  state.generatedSubtitleError = "";
+  state.generatedSubtitleProvider = String(meta.provider || "whisper");
+  state.generatedAudioPath = String(meta.audioPath || meta.audio_path || "").trim();
+  state.selectedSubtitleId = "generated-asr";
+  state.selectedSubtitleUrl = "boc://generated-asr";
+  const language = String(meta.language || state.settings?.transcriptionLanguage || "unknown").trim();
+  state.selectedSubtitleLang = `${language || "unknown"} (转写生成)`;
+  state.subtitles = [{
+    id: "generated-asr",
+    lan: language || "asr",
+    lanDoc: state.selectedSubtitleLang,
+    subtitleUrl: "boc://generated-asr",
+    source: "generated-asr"
+  }];
+  state.subtitleBody = body;
+  state.subtitleFetchState = "ready";
+  state.markdown = buildMarkdown(state, body, state.settings);
+  state.srt = buildSrt(body);
+  state.txt = buildTxt(body, state.settings);
+  byId(ids.preview).value = buildSubtitlePreview(body, state.settings);
+  renderMeta();
+  renderSubtitleSelect();
+  if (state.readingViewOpen) {
+    moveReadingMainInline();
+    renderReadingView();
+    renderReadingStatus("转写字幕已生成，阅读视图已同步。");
+    startReadingViewSync();
+    startReaderPlayerObserver();
+    syncReadingViewPlayback(true);
+  }
+}
+
+function getGeneratedSubtitleCacheKey() {
+  const provider = String(state.settings?.transcriptionProviderType || "whisper").trim().toLowerCase() || "whisper";
+  const model = String(state.settings?.transcriptionModel || "").trim().replace(/[^\w.-]+/g, "_") || "default";
+  const language = String(state.settings?.transcriptionLanguage || "").trim().replace(/[^\w.-]+/g, "_") || "auto";
+  return `${CACHE_KEY_PREFIX}generated_${state.bvid}_${state.cid}_${provider}_${model}_${language}`;
+}
+
+async function loadGeneratedSubtitleFromCache(cacheKey) {
+  try {
+    const result = await chrome.storage.local.get(cacheKey);
+    const cached = result[cacheKey] || null;
+    if (!cached?.body?.length) return null;
+    const check = validateSubtitleByDuration(cached.body, state.videoDuration);
+    return check.ok ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveGeneratedSubtitleToCache(cacheKey, value) {
+  try {
+    await chrome.storage.local.set({ [cacheKey]: value });
+  } catch (error) {
+    logWarn("[BOC] failed to save generated subtitle cache", error);
+  }
+}
+
+async function deleteGeneratedAudio() {
+  const audioPath = String(state.generatedAudioPath || "").trim();
+  if (!audioPath) {
+    throw new Error("当前没有可删除的本地音频缓存。");
+  }
+  const resp = await sendRuntimeMessage({ type: "delete-transcription-audio", audioPath });
+  if (!resp?.ok) {
+    throw new Error(toReadableText(resp?.error, "删除本地音频失败"));
+  }
+  state.generatedAudioPath = "";
+  const cacheKey = getGeneratedSubtitleCacheKey();
+  const cached = await loadGeneratedSubtitleFromCache(cacheKey);
+  if (cached?.body?.length) {
+    cached.audioPath = "";
+    await saveGeneratedSubtitleToCache(cacheKey, cached);
+  }
+  setMessage("本地音频缓存已删除，转写字幕仍保留。");
+}
+
+function updateGeneratedTranscriptionControls() {
+  const button = document.getElementById(ids.generateTranscriptBtn);
+  if (!button) return;
+  const canGenerate = Boolean(state.bvid && state.cid && state.subtitles.length === 0);
+  const isGenerated = state.subtitleSource === "generated-asr";
+  button.hidden = !(canGenerate || isGenerated || state.generatedSubtitleStatus === "error");
+  button.textContent = isGenerated ? "重新生成转写" : "生成转写字幕";
+}
 function renderMeta() {
   const meta = byId(ids.meta);
   if (!state.bvid) {
@@ -1326,8 +1535,9 @@ function renderSubtitleSelect() {
   const subtitles = state.subtitles || [];
 
   if (subtitles.length === 0) {
-    select.innerHTML = '<option value="">暂无字幕</option>';
+    select.innerHTML = '<option value="">暂无字幕轨</option>';
     select.disabled = true;
+    updateGeneratedTranscriptionControls();
     return;
   }
 
@@ -1349,6 +1559,7 @@ function renderSubtitleSelect() {
     })
     .join("");
   select.disabled = false;
+  updateGeneratedTranscriptionControls();
 }
 
 function renderReadingSubtitleSelect() {
@@ -1393,6 +1604,7 @@ function getPopupPayload() {
       url: item.subtitleUrl,
       lang: label,
       isAi,
+      isGenerated: item.source === "generated-asr" || item.id === "generated-asr",
       selected: selectedById || selectedByUrl
     };
   });
@@ -1411,7 +1623,11 @@ function getPopupPayload() {
     srt: state.srt || "",
     txt: state.txt || "",
     downloadFormat: normalizeDownloadFormat(state.settings?.downloadFormat),
-    subtitleOptions
+    subtitleOptions,
+    subtitleSource: state.subtitleSource || "none",
+    generatedSubtitleStatus: state.generatedSubtitleStatus || "idle",
+    generatedSubtitleError: state.generatedSubtitleError || "",
+    generatedAudioPath: state.generatedAudioPath || ""
   };
 }
 
@@ -1458,8 +1674,9 @@ async function downloadSubtitle() {
 async function sendToObsidian() {
   state.settings = await getSettings();
   if (!state.markdown) {
-    setMessage("没有可发送内容，请先刷新抓取。");
-    return;
+    const message = "没有可发送内容，请先刷新抓取。";
+    setMessage(message);
+    throw new Error(message);
   }
 
   const filename = buildNoteFilename(state);
@@ -1468,20 +1685,24 @@ async function sendToObsidian() {
   const baseUrl = String(state.settings.obsidianApiBaseUrl || "").trim();
   const apiKey = String(state.settings.obsidianApiKey || "").trim();
   if (!baseUrl || !apiKey) {
-    setMessage("请先在设置中填写 Obsidian Local REST API 地址和 API Key。");
+    const message = "请先在设置中填写 Obsidian Local REST API 地址和 API Key。";
+    setMessage(message);
     requestOpenOptions();
-    return;
+    throw new Error(message);
   }
 
   try {
     await writeNoteByLocalApi(baseUrl, apiKey, filepath, state.markdown);
     setMessage(`已写入 Obsidian：${filepath}`);
+    return { filepath };
   } catch (error) {
     if (isExtensionContextInvalidated(error)) {
-      setMessage("扩展刚刚更新，请刷新当前页面后重试。");
-      return;
+      const message = "扩展刚刚更新，请刷新当前页面后重试。";
+      setMessage(message);
+      throw new Error(message);
     }
     setMessage(`写入失败：${getErrorMessage(error)}`);
+    throw error;
   }
 }
 
@@ -1504,6 +1725,10 @@ function setBusyState(disabled) {
   byId(ids.sendBtn).disabled = disabled;
   byId(ids.refreshBtn).disabled = disabled;
   byId(ids.settingsBtn).disabled = disabled;
+  const generateTranscriptBtn = document.getElementById(ids.generateTranscriptBtn);
+  if (generateTranscriptBtn) {
+    generateTranscriptBtn.disabled = disabled;
+  }
   byId(ids.subtitleSelect).disabled = disabled || state.subtitles.length === 0;
 }
 
@@ -1523,6 +1748,11 @@ function applyNoSubtitleState() {
   state.selectedSubtitleLang = "";
   state.subtitleBody = [];
   state.subtitleFetchState = "empty";
+  state.subtitleSource = "none";
+  state.generatedSubtitleStatus = "idle";
+  state.generatedSubtitleError = "";
+  state.generatedSubtitleProvider = "";
+  state.generatedAudioPath = "";
   state.markdown = "";
   state.srt = "";
   state.txt = "";

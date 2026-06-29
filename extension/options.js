@@ -43,7 +43,19 @@ const DEFAULT_SETTINGS = {
   fixedFrontmatterProperties: [],
   notePlaceholderSections: [],
   aiSystemPrompt: DEFAULT_AI_SYSTEM_PROMPT,
-  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice()
+  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice(),
+  transcriptionEnabled: true,
+  transcriptionProviderType: "whisper",
+  transcriptionBaseUrl: "http://127.0.0.1:8765/v1",
+  transcriptionApiKey: "",
+  transcriptionModel: "whisper-1",
+  transcriptionLanguage: "zh",
+  transcriptionMaxDurationSeconds: 3600,
+  transcriptionUseFfmpeg: false,
+  transcriptionFfmpegEndpoint: "http://127.0.0.1:9000/ffmpeg/convert",
+  transcriptionFfmpegFormat: "mp3",
+  transcriptionKeepAudio: false,
+  transcriptionAudioCacheDir: ""
 };
 
 const SYSTEM_FRONTMATTER_FIELDS = new Set(DEFAULT_SETTINGS.frontmatterFields.map((field) => String(field).toLowerCase()));
@@ -74,6 +86,22 @@ const elements = {
   includeDateInFilename: document.getElementById("includeDateInFilename"),
   includeTimestampInBody: document.getElementById("includeTimestampInBody"),
   enableDebugLogs: document.getElementById("enableDebugLogs"),
+  transcriptionEnabled: document.getElementById("transcriptionEnabled"),
+  transcriptionBaseUrl: document.getElementById("transcriptionBaseUrl"),
+  transcriptionApiKey: document.getElementById("transcriptionApiKey"),
+  transcriptionModel: document.getElementById("transcriptionModel"),
+  transcriptionLanguage: document.getElementById("transcriptionLanguage"),
+  transcriptionMaxDurationSeconds: document.getElementById("transcriptionMaxDurationSeconds"),
+  transcriptionUseFfmpeg: document.getElementById("transcriptionUseFfmpeg"),
+  transcriptionFfmpegEndpoint: document.getElementById("transcriptionFfmpegEndpoint"),
+  transcriptionFfmpegFormat: document.getElementById("transcriptionFfmpegFormat"),
+  transcriptionKeepAudio: document.getElementById("transcriptionKeepAudio"),
+  transcriptionAudioCacheDir: document.getElementById("transcriptionAudioCacheDir"),
+  subtitleCacheStats: document.getElementById("subtitleCacheStats"),
+  subtitleCacheStatus: document.getElementById("subtitleCacheStatus"),
+  clearGeneratedSubtitleCacheBtn: document.getElementById("clearGeneratedSubtitleCacheBtn"),
+  clearAllSubtitleCacheBtn: document.getElementById("clearAllSubtitleCacheBtn"),
+  refreshSubtitleCacheStatsBtn: document.getElementById("refreshSubtitleCacheStatsBtn"),
   frontmatterFields: document.querySelectorAll('input[name="frontmatterField"]'),
   fixedPropertiesList: document.getElementById("fixedPropertiesList"),
   fixedPropertiesEmpty: document.getElementById("fixedPropertiesEmpty"),
@@ -101,6 +129,10 @@ function init() {
   elements.addFixedPropertyBtn.addEventListener("click", () => addFixedPropertyRow());
   elements.addNoteSectionBtn.addEventListener("click", () => addNoteSectionRow());
   elements.addAiProviderBtn.addEventListener("click", () => addAiProviderRow());
+  elements.clearGeneratedSubtitleCacheBtn?.addEventListener("click", () => clearSubtitleCache("generated"));
+  elements.clearAllSubtitleCacheBtn?.addEventListener("click", () => clearSubtitleCache("all"));
+  elements.refreshSubtitleCacheStatsBtn?.addEventListener("click", refreshSubtitleCacheStats);
+  refreshSubtitleCacheStats();
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest(".fixed-property-type-picker")) {
       closeAllFixedPropertyMenus();
@@ -121,6 +153,17 @@ async function loadSettings() {
   elements.includeDateInFilename.checked = settings.includeDateInFilename !== false;
   elements.includeTimestampInBody.checked = Boolean(settings.includeTimestampInBody);
   elements.enableDebugLogs.checked = Boolean(settings.enableDebugLogs);
+  elements.transcriptionEnabled.checked = settings.transcriptionEnabled !== false;
+  elements.transcriptionBaseUrl.value = settings.transcriptionBaseUrl || "";
+  elements.transcriptionApiKey.value = settings.transcriptionApiKey || "";
+  elements.transcriptionModel.value = settings.transcriptionModel || "";
+  elements.transcriptionLanguage.value = settings.transcriptionLanguage || "";
+  elements.transcriptionMaxDurationSeconds.value = Number(settings.transcriptionMaxDurationSeconds || 3600);
+  elements.transcriptionUseFfmpeg.checked = Boolean(settings.transcriptionUseFfmpeg);
+  elements.transcriptionFfmpegEndpoint.value = settings.transcriptionFfmpegEndpoint || "";
+  elements.transcriptionFfmpegFormat.value = settings.transcriptionFfmpegFormat || "mp3";
+  elements.transcriptionKeepAudio.checked = Boolean(settings.transcriptionKeepAudio);
+  elements.transcriptionAudioCacheDir.value = settings.transcriptionAudioCacheDir || "";
   const selectedFields = new Set(settings.frontmatterFields || DEFAULT_SETTINGS.frontmatterFields);
   elements.frontmatterFields.forEach((checkbox) => {
     checkbox.checked = selectedFields.has(checkbox.value);
@@ -197,6 +240,69 @@ function setStatus(text, isError = false) {
   elements.status.dataset.error = isError ? "true" : "false";
 }
 
+async function refreshSubtitleCacheStats() {
+  if (!elements.subtitleCacheStats) return;
+  try {
+    setCacheBusy(true);
+    const resp = await sendRuntimeMessage({ type: "subtitle-cache-stats" });
+    if (!resp?.ok) {
+      setCacheStatus(resp?.error || "读取字幕缓存数量失败", true);
+      return;
+    }
+    renderSubtitleCacheStats(resp.stats || {});
+    setCacheStatus("");
+  } catch (error) {
+    setCacheStatus(error.message || "读取字幕缓存数量失败", true);
+  } finally {
+    setCacheBusy(false);
+  }
+}
+
+async function clearSubtitleCache(scope) {
+  const isAll = scope === "all";
+  const message = isAll
+    ? "确定清理全部字幕缓存吗？包含原生字幕缓存和 Whisper 转写缓存，但不会删除 API Key、设置或 Obsidian 笔记。"
+    : "确定清理 Whisper 转写字幕缓存吗？下次打开这些无字幕视频时需要重新转写。";
+  if (!confirm(message)) return;
+  try {
+    setCacheBusy(true);
+    setCacheStatus("正在清理...");
+    const resp = await sendRuntimeMessage({ type: "subtitle-cache-clear", scope: isAll ? "all" : "generated" });
+    if (!resp?.ok) {
+      setCacheStatus(resp?.error || "清理字幕缓存失败", true);
+      return;
+    }
+    const removed = Number(resp.result?.removed || 0);
+    renderSubtitleCacheStats(resp.result?.stats || {});
+    setCacheStatus(`已清理 ${removed} 条字幕缓存。`);
+  } catch (error) {
+    setCacheStatus(error.message || "清理字幕缓存失败", true);
+  } finally {
+    setCacheBusy(false);
+  }
+}
+
+function renderSubtitleCacheStats(stats) {
+  const generated = Number(stats.generated || 0);
+  const total = Number(stats.total || 0);
+  elements.subtitleCacheStats.textContent = `当前字幕缓存：转写字幕 ${generated} 条，全部字幕 ${total} 条。`;
+}
+
+function setCacheStatus(text, isError = false) {
+  if (!elements.subtitleCacheStatus) return;
+  elements.subtitleCacheStatus.textContent = text;
+  elements.subtitleCacheStatus.dataset.error = isError ? "true" : "false";
+}
+
+function setCacheBusy(isBusy) {
+  [
+    elements.clearGeneratedSubtitleCacheBtn,
+    elements.clearAllSubtitleCacheBtn,
+    elements.refreshSubtitleCacheStatsBtn
+  ].forEach((button) => {
+    if (button) button.disabled = isBusy;
+  });
+}
 function normalizeDownloadFormat(value) {
   return value === "txt" ? "txt" : "srt";
 }
@@ -220,6 +326,18 @@ function collectFormPayload() {
     includeDateInFilename: elements.includeDateInFilename.checked,
     includeTimestampInBody: elements.includeTimestampInBody.checked,
     enableDebugLogs: elements.enableDebugLogs.checked,
+    transcriptionEnabled: elements.transcriptionEnabled.checked,
+    transcriptionProviderType: "whisper",
+    transcriptionBaseUrl: normalizeBaseUrl(elements.transcriptionBaseUrl.value),
+    transcriptionApiKey: normalizeApiKey(elements.transcriptionApiKey.value),
+    transcriptionModel: elements.transcriptionModel.value.trim(),
+    transcriptionLanguage: elements.transcriptionLanguage.value.trim(),
+    transcriptionMaxDurationSeconds: Math.max(60, Number(elements.transcriptionMaxDurationSeconds.value || 3600) || 3600),
+    transcriptionUseFfmpeg: elements.transcriptionUseFfmpeg.checked,
+    transcriptionFfmpegEndpoint: normalizeBaseUrl(elements.transcriptionFfmpegEndpoint.value),
+    transcriptionFfmpegFormat: elements.transcriptionFfmpegFormat.value.trim() || "mp3",
+    transcriptionKeepAudio: elements.transcriptionKeepAudio.checked,
+    transcriptionAudioCacheDir: elements.transcriptionAudioCacheDir.value.trim(),
     frontmatterFields: selectedFields,
     fixedFrontmatterProperties: normalizeFixedFrontmatterProperties(collectFixedPropertyRows()),
     notePlaceholderSections: normalizeNotePlaceholderSections(collectNoteSectionRows()),
@@ -287,6 +405,17 @@ function validateSettings(payload, { requireApiKey }) {
     return noteSectionValidation;
   }
 
+  if (payload.transcriptionEnabled) {
+    if (!payload.transcriptionBaseUrl) {
+      return { ok: false, field: elements.transcriptionBaseUrl, message: "请填写 Whisper-compatible Base URL" };
+    }
+    if (!payload.transcriptionModel) {
+      return { ok: false, field: elements.transcriptionModel, message: "请填写 Whisper 模型名" };
+    }
+    if (payload.transcriptionUseFfmpeg && !payload.transcriptionFfmpegEndpoint) {
+      return { ok: false, field: elements.transcriptionFfmpegEndpoint, message: "启用 FFmpeg 时需要填写服务地址" };
+    }
+  }
   return { ok: true };
 }
 
@@ -650,7 +779,6 @@ function validateFixedFrontmatterProperties(items) {
     }
     seenKeys.add(lowerKey);
   }
-
   return { ok: true };
 }
 

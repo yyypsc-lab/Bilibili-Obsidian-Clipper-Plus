@@ -1,6 +1,35 @@
 .DS_Store
+Thumbs.db
+
+# Local build/release artifacts
 release/
+dist/
+build/
+*.crx
+*.pem
+*.zip
+extension.crx
+extension.pem
+
+# Local caches and temporary files
+.cache/
+*.log
+*.tmp
+*.temp
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local editor/agent files
 .claude/
 AGENTS.md
+.vscode/
+.idea/
+
+# Store listing drafts / local-only docs
 PRIVACY_POLICY_zh-CN.md
 WEBSTORE_LISTING_zh-CN.md
+
+# Local audio/video cache folders
+bilibili-audio/
+BilibiliAudioCache/

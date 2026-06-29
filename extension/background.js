@@ -1,3 +1,9 @@
+try {
+  importScripts("transcription/normalize.js");
+} catch (error) {
+  console.warn("[BOC] transcription normalize loader failed", error);
+}
+
 const DEFAULT_PRESET_PROMPTS = [
   "生成视频摘要和结论",
   "按章节整理视频内容",
@@ -50,13 +56,27 @@ const DEFAULT_SYNC_SETTINGS = {
   fixedFrontmatterProperties: [],
   notePlaceholderSections: [],
   aiSystemPrompt: DEFAULT_AI_SYSTEM_PROMPT,
-  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice()
+  aiPresetPrompts: DEFAULT_PRESET_PROMPTS.slice(),
+  transcriptionEnabled: true,
+  transcriptionProviderType: "whisper",
+  transcriptionBaseUrl: "http://127.0.0.1:8765/v1",
+  transcriptionModel: "whisper-1",
+  transcriptionLanguage: "zh",
+  transcriptionMaxDurationSeconds: 3600,
+  transcriptionUseFfmpeg: false,
+  transcriptionFfmpegEndpoint: "http://127.0.0.1:9000/ffmpeg/convert",
+  transcriptionFfmpegFormat: "mp3",
+  transcriptionKeepAudio: false,
+  transcriptionAudioCacheDir: ""
 };
 
 const DEFAULT_LOCAL_SETTINGS = {
-  obsidianApiKey: ""
+  obsidianApiKey: "",
+  transcriptionApiKey: ""
 };
 const EXPECTED_CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version || "";
+const SUBTITLE_CACHE_PREFIX = "boc_subtitle_cache_";
+const GENERATED_SUBTITLE_CACHE_PREFIX = "boc_subtitle_cache_generated_";
 
 chrome.runtime.onInstalled.addListener(async () => {
   await initializeSettingsStorage();
@@ -318,7 +338,7 @@ function buildCanonicalVideoUrl(bvid, pageIndex = 1) {
 
 function createBiliHeaders(url) {
   const headers = new Headers();
-  const isBiliRequest = /(?:api\.bilibili\.com|hdslb\.com)/.test(String(url || ""));
+  const isBiliRequest = /(?:api\.bilibili\.com|hdslb\.com|bilivideo\.com)/.test(String(url || ""));
   if (isBiliRequest) {
     headers.set("Accept", "application/json, text/plain, */*");
     headers.set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
@@ -338,7 +358,7 @@ async function fetchJsonForAi(url) {
   if (headers.size > 0) {
     options.headers = headers;
   }
-  if (/(?:api\.bilibili\.com|hdslb\.com)/.test(String(url || ""))) {
+  if (/(?:api\.bilibili\.com|hdslb\.com|bilivideo\.com)/.test(String(url || ""))) {
     options.referrer = "https://www.bilibili.com/";
     options.referrerPolicy = "strict-origin-when-cross-origin";
   }
@@ -797,6 +817,303 @@ async function resolveAiSidepanelPageRef(contextRef) {
   };
 }
 
+async function generateTranscriptionSubtitle({ bvid, cid, aid = "", videoDuration = 0, force = false } = {}) {
+  const safeBvid = String(bvid || "").trim();
+  const safeCid = String(cid || "").trim();
+  if (!safeBvid || !safeCid) {
+    throw new Error("缺少视频 bvid 或 cid，无法生成转写字幕");
+  }
+
+  const settings = await getMergedSettings();
+  if (settings.transcriptionEnabled === false) {
+    throw new Error("无字幕轨转写功能未启用，请先在设置中开启");
+  }
+
+  const duration = Number(videoDuration || 0) || 0;
+  const maxDuration = Number(settings.transcriptionMaxDurationSeconds || 3600) || 3600;
+  if (duration > maxDuration) {
+    throw new Error(`视频时长超过转写上限：${Math.round(duration)}s / ${maxDuration}s`);
+  }
+
+  let raw;
+  if (isLocalTranscriptionBaseUrl(settings.transcriptionBaseUrl)) {
+    raw = await transcribeBiliAudioWithLocalHelper({ bvid: safeBvid, cid: safeCid, aid }, settings);
+  } else {
+    const audio = await fetchBiliAudioBlob({ bvid: safeBvid, cid: safeCid, aid });
+    let audioBlob = audio.blob;
+    let filename = audio.filename;
+    let contentType = audio.contentType;
+    if (settings.transcriptionUseFfmpeg) {
+      const converted = await convertAudioWithFfmpeg(audioBlob, filename, contentType, settings);
+      audioBlob = converted.blob;
+      filename = converted.filename;
+      contentType = converted.contentType;
+    }
+    raw = await transcribeWithWhisperCompatible(audioBlob, filename, contentType, settings);
+  }
+  const normalizer = globalThis.BOCTranscriptionNormalize;
+  if (!normalizer?.normalizeTranscriptionSegments) {
+    throw new Error("转写归一化模块未加载");
+  }
+  const body = normalizer.normalizeTranscriptionSegments(raw, duration);
+  if (!body.length) {
+    throw new Error("转写服务未返回可用字幕分段");
+  }
+  return {
+    body,
+    language: String(raw?.language || settings.transcriptionLanguage || "unknown").trim(),
+    provider: String(settings.transcriptionProviderType || "whisper"),
+    model: String(settings.transcriptionModel || "").trim(),
+    source: "generated-asr",
+    audioPath: String(raw?.audio_path || "").trim()
+  };
+}
+
+async function fetchBiliAudioBlob({ bvid, cid, aid = "" }) {
+  const url = buildBiliPlayUrl({ bvid, cid, aid });
+  const payload = await fetchJsonForAi(url);
+  if (payload?.code !== 0) {
+    throw new Error(String(payload?.message || "无法获取视频音频信息"));
+  }
+  const candidates = pickBiliAudioCandidates(payload?.data);
+  if (!candidates.length) {
+    throw new Error("没有找到可用音频流");
+  }
+
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(candidate.url, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: createBiliAudioHeaders(candidate.url),
+        referrer: `https://www.bilibili.com/video/${bvid}/`,
+        referrerPolicy: "strict-origin-when-cross-origin"
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      if (!blob.size) {
+        throw new Error("empty audio blob");
+      }
+      const contentType = response.headers.get("content-type") || candidate.mimeType || blob.type || "audio/mp4";
+      const extension = guessAudioExtension(contentType, candidate.url);
+      return {
+        blob,
+        contentType,
+        filename: `bilibili-${bvid}-${cid}.${extension}`
+      };
+    } catch (error) {
+      errors.push(`${candidate.host || "audio"}: ${error?.message || String(error)}`);
+    }
+  }
+  throw new Error(`音频下载失败：${errors.join("; ")}`);
+}
+
+function buildBiliPlayUrl({ bvid, cid, aid = "" }) {
+  const params = new URLSearchParams({
+    bvid: String(bvid || ""),
+    cid: String(cid || ""),
+    fnval: "16",
+    fourk: "1"
+  });
+  if (aid) {
+    params.set("avid", String(aid));
+  }
+  return `https://api.bilibili.com/x/player/playurl?${params.toString()}`;
+}
+
+function pickBiliAudioCandidates(data) {
+  const seen = new Set();
+  const pushCandidate = (target, rawUrl, bandwidth, mimeType) => {
+    const url = normalizeSubtitleUrl(rawUrl || "");
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    let host = "audio";
+    try {
+      host = new URL(url).host;
+    } catch {}
+    target.push({
+      url,
+      host,
+      bandwidth: Number(bandwidth || 0) || 0,
+      mimeType: String(mimeType || "audio/mp4")
+    });
+  };
+
+  const dashAudio = Array.isArray(data?.dash?.audio) ? data.dash.audio : [];
+  const candidates = [];
+  dashAudio
+    .slice()
+    .sort((a, b) => Math.abs(Number(a?.bandwidth || 0) - 64000) - Math.abs(Number(b?.bandwidth || 0) - 64000))
+    .forEach((item) => {
+      const bandwidth = Number(item?.bandwidth || 0) || 0;
+      const mimeType = String(item?.mimeType || item?.mime_type || "audio/mp4");
+      pushCandidate(candidates, item?.baseUrl || item?.base_url, bandwidth, mimeType);
+      const backups = item?.backupUrl || item?.backup_url || [];
+      (Array.isArray(backups) ? backups : []).forEach((backupUrl) => pushCandidate(candidates, backupUrl, bandwidth, mimeType));
+    });
+  if (candidates.length) {
+    return candidates;
+  }
+  const durl = Array.isArray(data?.durl) ? data.durl : [];
+  durl.forEach((item) => pushCandidate(candidates, item?.url, 0, "audio/mp4"));
+  return candidates;
+}
+
+function createBiliAudioHeaders(url) {
+  const headers = createBiliHeaders(url);
+  headers.set("Accept", "*/*");
+  headers.set("Range", "bytes=0-");
+  return headers;
+}
+
+async function convertAudioWithFfmpeg(audioBlob, filename, contentType, settings) {
+  const endpoint = String(settings.transcriptionFfmpegEndpoint || "").trim();
+  if (!endpoint) {
+    throw new Error("已启用 FFmpeg 预处理，但未配置 FFmpeg 服务地址");
+  }
+  const format = String(settings.transcriptionFfmpegFormat || "mp3").trim() || "mp3";
+  const form = new FormData();
+  form.append("file", audioBlob, filename || "audio.m4a");
+  form.append("output_format", format);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    body: form
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`FFmpeg 预处理失败：HTTP ${response.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
+  }
+  const blob = await response.blob();
+  return {
+    blob,
+    contentType: response.headers.get("content-type") || contentType || `audio/${format}`,
+    filename: filename.replace(/\.[^.]+$/, `.${format}`)
+  };
+}
+
+async function transcribeBiliAudioWithLocalHelper({ bvid, cid, aid = "" }, settings) {
+  const baseUrl = String(settings.transcriptionBaseUrl || "").trim().replace(/\/+$/, "");
+  const model = String(settings.transcriptionModel || "").trim();
+  const payload = await fetchJsonForAi(buildBiliPlayUrl({ bvid, cid, aid }));
+  if (payload?.code !== 0) {
+    throw new Error(String(payload?.message || "无法获取视频音频信息"));
+  }
+  const audioUrls = pickBiliAudioCandidates(payload?.data).map((item) => ({
+    url: item.url,
+    host: item.host,
+    bandwidth: item.bandwidth,
+    mimeType: item.mimeType
+  }));
+  if (!audioUrls.length) {
+    throw new Error("没有找到可用音频流");
+  }
+  const headers = { "Content-Type": "application/json" };
+  const apiKey = normalizeApiKey(settings.transcriptionApiKey);
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  const response = await fetch(`${baseUrl}/bilibili/transcriptions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      bvid,
+      cid,
+      aid,
+      audio_urls: audioUrls,
+      model,
+      language: String(settings.transcriptionLanguage || "").trim(),
+      keep_audio: Boolean(settings.transcriptionKeepAudio),
+      audio_cache_dir: String(settings.transcriptionAudioCacheDir || "").trim()
+    })
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`本地 Whisper 音频下载/转写失败：HTTP ${response.status}${detail ? ` ${detail.slice(0, 300)}` : ""}`);
+  }
+  return response.json();
+}
+
+async function deleteLocalCachedAudio(audioPath, settings) {
+  const baseUrl = String(settings.transcriptionBaseUrl || "").trim().replace(/\/+$/, "");
+  if (!audioPath) {
+    throw new Error("缺少本地音频路径");
+  }
+  if (!isLocalTranscriptionBaseUrl(baseUrl)) {
+    throw new Error("只有本地 Whisper 服务支持删除缓存音频");
+  }
+  const response = await fetch(`${baseUrl}/bilibili/audio/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio_path: audioPath })
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`删除本地音频失败：HTTP ${response.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
+  }
+  return response.json();
+}
+
+function isLocalTranscriptionBaseUrl(baseUrl) {
+  try {
+    const parsed = new URL(String(baseUrl || ""));
+    return ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+async function transcribeWithWhisperCompatible(audioBlob, filename, contentType, settings) {
+  const baseUrl = String(settings.transcriptionBaseUrl || "").trim().replace(/\/+$/, "");
+  const model = String(settings.transcriptionModel || "").trim();
+  if (!baseUrl) {
+    throw new Error("请先配置 Whisper-compatible baseUrl");
+  }
+  if (!model) {
+    throw new Error("请先配置 Whisper 模型名");
+  }
+  const apiKey = normalizeApiKey(settings.transcriptionApiKey);
+  const headers = {};
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  const form = new FormData();
+  form.append("file", audioBlob, filename || "audio.m4a");
+  form.append("model", model);
+  form.append("response_format", "verbose_json");
+  const language = String(settings.transcriptionLanguage || "").trim();
+  if (language) {
+    form.append("language", language);
+  }
+  form.append("timestamp_granularities[]", "segment");
+
+  const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+    method: "POST",
+    headers,
+    body: form
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Whisper 转写失败：HTTP ${response.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
+  }
+  return response.json();
+}
+
+function guessAudioExtension(contentType, url = "") {
+  const type = String(contentType || "").toLowerCase();
+  if (type.includes("mpeg") || type.includes("mp3")) return "mp3";
+  if (type.includes("wav")) return "wav";
+  if (type.includes("ogg")) return "ogg";
+  if (type.includes("webm")) return "webm";
+  try {
+    const pathname = new URL(String(url || "")).pathname;
+    const ext = pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1];
+    if (ext) return ext.toLowerCase();
+  } catch {}
+  return "m4a";
+}
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") {
     return false;
@@ -861,6 +1178,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "generate-transcription-subtitle") {
+    generateTranscriptionSubtitle(message || {})
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message.type === "delete-transcription-audio") {
+    getMergedSettings()
+      .then((settings) => deleteLocalCachedAudio(String(message.audioPath || ""), settings))
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message.type === "subtitle-cache-stats") {
+    getSubtitleCacheStats()
+      .then((stats) => sendResponse({ ok: true, stats }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message.type === "subtitle-cache-clear") {
+    clearSubtitleCache(String(message.scope || "generated"))
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
   if (message.type === "fetch-json") {
     const url = typeof message.url === "string" ? message.url : "";
     if (!url) {
@@ -868,7 +1213,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
 
-    const isBiliRequest = /(?:api\.bilibili\.com|hdslb\.com)/.test(url);
+    const isBiliRequest = /(?:api\.bilibili\.com|hdslb\.com|bilivideo\.com)/.test(url);
     const headers = new Headers();
     if (isBiliRequest) {
       headers.set("Accept", "application/json, text/plain, */*");
@@ -942,7 +1287,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: false, error: `HTTP ${response.status}.${detail}` });
           return;
         }
-        sendResponse({ ok: true });
+        const verify = await fetch(endpoint, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            Accept: "text/markdown, text/plain, */*"
+          },
+          cache: "no-store"
+        }).catch((error) => ({ ok: false, status: 0, text: async () => error.message || String(error) }));
+        if (!verify.ok) {
+          const verifyText = await verify.text().catch(() => "");
+          sendResponse({
+            ok: false,
+            error: `写入后校验失败：HTTP ${verify.status || 0}${verifyText ? ` ${verifyText.slice(0, 200)}` : ""}`
+          });
+          return;
+        }
+        const savedText = await verify.text().catch(() => "");
+        if (!savedText || savedText.trim() !== content.trim()) {
+          sendResponse({ ok: false, error: "写入后校验失败：Obsidian 返回内容与待保存内容不一致" });
+          return;
+        }
+        sendResponse({ ok: true, verified: true, filepath });
       })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
 
@@ -1171,7 +1537,8 @@ async function initializeSettingsStorage() {
 
   await chrome.storage.sync.set({ ...DEFAULT_SYNC_SETTINGS, ...syncCurrent });
   await chrome.storage.local.set({
-    obsidianApiKey: normalizeApiKey(localCurrent.obsidianApiKey)
+    obsidianApiKey: normalizeApiKey(localCurrent.obsidianApiKey),
+    transcriptionApiKey: normalizeApiKey(localCurrent.transcriptionApiKey)
   });
 
   const legacySyncApiKey = normalizeApiKey(syncCurrent.obsidianApiKey);
@@ -1215,14 +1582,41 @@ async function getMergedSettings() {
 
   return {
     ...merged,
-    obsidianApiKey: apiKey
+    obsidianApiKey: apiKey,
+    transcriptionApiKey: normalizeApiKey(localSettings.transcriptionApiKey)
   };
 }
 
+async function getSubtitleCacheStats() {
+  const data = await chrome.storage.local.get(null);
+  const keys = Object.keys(data || {});
+  const generatedKeys = keys.filter((key) => key.startsWith(GENERATED_SUBTITLE_CACHE_PREFIX));
+  const subtitleKeys = keys.filter((key) => key.startsWith(SUBTITLE_CACHE_PREFIX));
+  return {
+    generated: generatedKeys.length,
+    total: subtitleKeys.length
+  };
+}
+
+async function clearSubtitleCache(scope = "generated") {
+  const data = await chrome.storage.local.get(null);
+  const normalizedScope = scope === "all" ? "all" : "generated";
+  const prefix = normalizedScope === "all" ? SUBTITLE_CACHE_PREFIX : GENERATED_SUBTITLE_CACHE_PREFIX;
+  const keys = Object.keys(data || {}).filter((key) => key.startsWith(prefix));
+  if (keys.length) {
+    await chrome.storage.local.remove(keys);
+  }
+  return {
+    scope: normalizedScope,
+    removed: keys.length,
+    stats: await getSubtitleCacheStats()
+  };
+}
 async function saveSettings(settings) {
   const payload = settings && typeof settings === "object" ? settings : {};
   const syncPayload = { ...payload };
   delete syncPayload.obsidianApiKey;
+  delete syncPayload.transcriptionApiKey;
   syncPayload.downloadFormat = normalizeDownloadFormat(syncPayload.downloadFormat);
   syncPayload.readerTheme = normalizeReaderTheme(syncPayload.readerTheme);
   syncPayload.readerFontScale = normalizeReaderFontScale(syncPayload.readerFontScale);
@@ -1241,7 +1635,8 @@ async function saveSettings(settings) {
   await Promise.all([
     chrome.storage.sync.set(syncPayload),
     chrome.storage.local.set({
-      obsidianApiKey: normalizeApiKey(payload.obsidianApiKey)
+      obsidianApiKey: normalizeApiKey(payload.obsidianApiKey),
+      transcriptionApiKey: normalizeApiKey(payload.transcriptionApiKey)
     })
   ]);
 }

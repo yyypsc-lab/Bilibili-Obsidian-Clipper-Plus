@@ -114,6 +114,50 @@
       </section>
 
       <section class="field-group">
+        <h2>无字幕轨转写</h2>
+        <p class="hint">无字幕轨时，插件会临时获取音频并提交到你配置的 Whisper-compatible 服务。FFmpeg 预处理为可选外部服务。</p>
+        <label class="checkbox">
+          <input id="transcriptionEnabled" type="checkbox" />
+          启用无字幕轨转写
+        </label>
+        <label for="transcriptionBaseUrl">Whisper-compatible Base URL</label>
+        <input id="transcriptionBaseUrl" type="text" placeholder="例如：http://127.0.0.1:8765/v1" />
+        <label for="transcriptionModel">Whisper 模型名</label>
+        <input id="transcriptionModel" type="text" placeholder="例如：whisper-1" />
+        <label for="transcriptionApiKey">Whisper API Key</label>
+        <input id="transcriptionApiKey" type="password" placeholder="远程服务需要填写；本地服务可留空" />
+        <label for="transcriptionLanguage">默认语言</label>
+        <input id="transcriptionLanguage" type="text" placeholder="例如：zh" />
+        <label for="transcriptionMaxDurationSeconds">最大视频时长（秒）</label>
+        <input id="transcriptionMaxDurationSeconds" type="number" min="60" step="60" />
+        <label class="checkbox">
+          <input id="transcriptionKeepAudio" type="checkbox" />
+          保留转写音频缓存
+        </label>
+        <label for="transcriptionAudioCacheDir">音频缓存目录</label>
+        <input id="transcriptionAudioCacheDir" type="text" placeholder="留空则使用项目 .cache/bilibili-audio" />
+        <p class="hint inline-hint">开启后，本地 Whisper 服务会把音频保存到该目录；可在弹窗中删除对应音频。</p>
+        <label class="checkbox">
+          <input id="transcriptionUseFfmpeg" type="checkbox" />
+          转写前调用 FFmpeg 预处理服务
+        </label>
+        <label for="transcriptionFfmpegEndpoint">FFmpeg 服务地址</label>
+        <input id="transcriptionFfmpegEndpoint" type="text" placeholder="例如：http://127.0.0.1:9000/ffmpeg/convert" />
+        <label for="transcriptionFfmpegFormat">FFmpeg 输出格式</label>
+        <input id="transcriptionFfmpegFormat" type="text" placeholder="例如：mp3" />
+      </section>
+      <section class="field-group cache-manager">
+        <h2>字幕缓存管理</h2>
+        <p class="hint">这里清理的是 Chrome 扩展本地保存的字幕文本缓存，不会删除 Obsidian 笔记、API Key 或本地音频文件。</p>
+        <p id="subtitleCacheStats" class="cache-stats">正在读取缓存数量...</p>
+        <div class="cache-actions">
+          <button id="clearGeneratedSubtitleCacheBtn" class="secondary-btn" type="button">清理转写字幕缓存</button>
+          <button id="clearAllSubtitleCacheBtn" class="secondary-btn danger-btn" type="button">清理全部字幕缓存</button>
+          <button id="refreshSubtitleCacheStatsBtn" class="secondary-btn" type="button">刷新数量</button>
+        </div>
+        <p id="subtitleCacheStatus" class="cache-status" aria-live="polite"></p>
+      </section>
+      <section class="field-group">
         <h2>AI 模型平台</h2>
         <p class="hint">支持 OpenAI 兼容协议（OpenAI / DeepSeek / 智谱 / MiniMax / Moonshot / OpenRouter / Ollama 等）。</p>
         <div id="aiProvidersList" class="ai-providers-list"></div>

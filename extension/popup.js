@@ -12,11 +12,17 @@ const el = {
   downloadBtn: document.getElementById("downloadBtn"),
   sendBtn: document.getElementById("sendBtn"),
   readingViewBtn: document.getElementById("readingViewBtn"),
+  generateTranscriptBtn: document.getElementById("generateTranscriptBtn"),
+  deleteAudioBtn: document.getElementById("deleteAudioBtn"),
+  transcriptionProgress: document.getElementById("transcriptionProgress"),
+  transcriptionProgressBar: document.getElementById("transcriptionProgressBar"),
   aiBtn: document.getElementById("aiBtn"),
   settingsBtn: document.getElementById("settingsBtn")
 };
 
 let latestPayload = null;
+let progressTimer = 0;
+let progressValue = 0;
 const EXPECTED_CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version || "";
 const DEFAULT_SETTINGS = {
   downloadFormat: "srt"
@@ -33,7 +39,7 @@ init().catch((error) => {
 
 async function init() {
   bindEvents();
-  await refreshFromTab();
+  await loadStateOrRefresh();
 }
 
 function bindEvents() {
@@ -118,6 +124,38 @@ function bindEvents() {
     window.setTimeout(() => window.close(), 80);
   });
 
+  el.generateTranscriptBtn?.addEventListener("click", async () => {
+    startProgress("正在生成转写字幕...");
+    setMessage("插件会临时获取音频并提交到你配置的 Whisper-compatible 服务。");
+    setBusy(true);
+    try {
+      const resp = await sendToContent({ type: "popup-generate-transcription", force: true });
+      if (!resp?.ok) {
+        setStatus(`转写失败：${resp?.error || "未知错误"}`, true);
+        setMessage(`转写失败：${resp?.error || "未知错误"}`);
+      }
+      completeProgress();
+      render(resp?.payload || latestPayload);
+    } finally {
+      stopProgress();
+      setBusy(false);
+    }
+  });
+  el.deleteAudioBtn?.addEventListener("click", async () => {
+    setStatus("正在删除本地音频...");
+    setBusy(true);
+    try {
+      const resp = await sendToContent({ type: "popup-delete-transcription-audio" });
+      if (!resp?.ok) {
+        setStatus(`删除失败：${resp?.error || "未知错误"}`, true);
+        setMessage(`删除失败：${resp?.error || "未知错误"}`);
+      }
+      render(resp?.payload || latestPayload);
+    } finally {
+      setBusy(false);
+    }
+  });
+
   el.subtitleSelect.addEventListener("change", async (event) => {
     const option = event.target.options[event.target.selectedIndex];
     const url = String(option?.value || "");
@@ -170,6 +208,25 @@ function bindEvents() {
   });
 }
 
+async function loadStateOrRefresh() {
+  setStatus("正在读取当前页面状态...");
+  const resp = await sendToContent({ type: "popup-get-state" });
+  if (resp?.ok && resp.payload && hasUsablePayload(resp.payload)) {
+    render(resp.payload);
+    return;
+  }
+  await refreshFromTab();
+}
+
+function hasUsablePayload(payload) {
+  return Boolean(
+    payload?.title ||
+    payload?.markdown ||
+    payload?.subtitlePreview ||
+    payload?.generatedSubtitleStatus === "ready" ||
+    payload?.generatedSubtitleStatus === "transcribing"
+  );
+}
 async function refreshFromTab() {
   setStatus("正在抓取...");
   const resp = await sendToContent({ type: "popup-refresh" });
@@ -224,7 +281,7 @@ function render(payload, { preserveStatus = false } = {}) {
     el.subtitleSelect.innerHTML = options
       .map((item) => {
         const selected = item.selected ? "selected" : "";
-        const aiTag = item.isAi ? " [AI]" : "";
+        const aiTag = item.isGenerated ? " [ASR]" : (item.isAi ? " [AI]" : "");
         return `<option value="${escapeHtml(item.url)}" data-id="${escapeHtml(
           item.id || ""
         )}" data-lang="${escapeHtml(item.lang || "")}" ${selected}>${escapeHtml(
@@ -235,6 +292,16 @@ function render(payload, { preserveStatus = false } = {}) {
     el.subtitleSelect.disabled = false;
   }
 
+  const canGenerate = options.length === 0 && payload.url && payload.status;
+  const isGenerated = payload.subtitleSource === "generated-asr";
+  if (el.generateTranscriptBtn) {
+    el.generateTranscriptBtn.hidden = !(canGenerate || isGenerated || payload.generatedSubtitleStatus === "error");
+    el.generateTranscriptBtn.textContent = isGenerated ? "重新生成转写" : "生成转写字幕";
+  }
+  if (el.deleteAudioBtn) {
+    el.deleteAudioBtn.hidden = !payload.generatedAudioPath;
+    el.deleteAudioBtn.title = payload.generatedAudioPath || "";
+  }
   el.preview.value = payload.subtitlePreview || "";
 }
 
@@ -251,6 +318,47 @@ function setMessage(text) {
   el.message.textContent = String(text || "");
 }
 
+function startProgress(text) {
+  progressValue = 12;
+  setProgress(progressValue);
+  setStatus(text || "处理中...");
+  if (progressTimer) window.clearInterval(progressTimer);
+  progressTimer = window.setInterval(() => {
+    progressValue = Math.min(90, progressValue + (progressValue < 50 ? 6 : 2));
+    setProgress(progressValue);
+  }, 1200);
+}
+
+function completeProgress() {
+  setProgress(100);
+}
+
+function stopProgress() {
+  if (progressTimer) {
+    window.clearInterval(progressTimer);
+    progressTimer = 0;
+  }
+  window.setTimeout(() => {
+    if (!progressTimer && el.transcriptionProgress) {
+      el.transcriptionProgress.hidden = true;
+      setProgress(0);
+    }
+  }, 800);
+}
+
+function setProgress(value) {
+  if (!el.transcriptionProgress || !el.transcriptionProgressBar) return;
+  const percent = Math.max(0, Math.min(100, Number(value) || 0));
+  el.transcriptionProgress.hidden = percent <= 0;
+  el.transcriptionProgressBar.style.width = `${percent}%`;
+}
+function setBusy(isBusy) {
+  [el.refreshBtn, el.copyBtn, el.downloadBtn, el.sendBtn, el.readingViewBtn, el.generateTranscriptBtn, el.deleteAudioBtn]
+    .filter(Boolean)
+    .forEach((button) => {
+      button.disabled = Boolean(isBusy);
+    });
+}
 function sanitizeFileName(value) {
   return String(value || "subtitle")
     .replace(/[\\/:*?"<>|]/g, "_")

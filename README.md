@@ -1,95 +1,227 @@
-# Bilibili Obsidian Clipper｜一键保存B站字幕
+<div align="center">
 
-[![GitHub all releases downloads](https://img.shields.io/github/downloads/haixiong1997/Bilibili-Obsidian-Clipper/total?style=flat-square&logo=github&label=downloads)](https://github.com/haixiong1997/Bilibili-Obsidian-Clipper/releases)
-[![Chrome Web Store users](https://img.shields.io/chrome-web-store/users/jokophbofiphenlplmohabdcmalcbenl?style=flat-square&logo=google-chrome&logoColor=white&label=chrome)](https://chromewebstore.google.com/detail/jokophbofiphenlplmohabdcmalcbenl)
-[![GitHub release](https://img.shields.io/github/v/release/haixiong1997/Bilibili-Obsidian-Clipper?style=flat-square&label=version)](https://github.com/haixiong1997/Bilibili-Obsidian-Clipper/releases)
+# Bilibili Obsidian Clipper Plus
 
-推荐官方插件市场下载：[Chrome](https://chromewebstore.google.com/detail/jokophbofiphenlplmohabdcmalcbenl?utm_source=item-share-cb) · [Edge](https://microsoftedge.microsoft.com/addons/detail/fbeeapnjdjgacilaobonekidbfjcmdjo) · [Firefox](https://addons.mozilla.org/addon/bilibili-obsidian-clipper/)
+Bilibili subtitle clipper for Obsidian, with local Whisper transcription for Bilibili videos without subtitle tracks.
 
-在 B 站视频页抓取字幕，预览后可复制 Markdown、下载字幕文件，并一键写入 Obsidian（Local REST API）。
+[中文](README.zh-CN.md) | English
 
-> 注意：仅支持获取“有字幕轨”的 B 站视频字幕（播放器里有「字幕」选项，通常表示作者上传了外挂字幕或平台提供了 AI 字幕）；没有字幕轨的视频无法获取字幕。
+[![Chrome Extension](https://img.shields.io/badge/Chrome-Extension-4285F4?logo=googlechrome&logoColor=white)](#installation)
+[![Obsidian](https://img.shields.io/badge/Obsidian-Local%20REST%20API-7C3AED)](#obsidian-setup)
+[![Whisper](https://img.shields.io/badge/Whisper-Local%20ASR-0F766E)](#local-whisper-transcription)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## 功能
+</div>
 
-- B 站视频字幕抓取（自动识别当前分 P）
-- 字幕预览、复制 Markdown
-- 下载字幕文件（`srt/txt`）
-- 保存到 Obsidian（Local REST API）
+## Overview
 
-### 阅读视图（v1.0.18+）
+`Bilibili Obsidian Clipper Plus` is an enhanced fork of [haixiong1997/Bilibili-Obsidian-Clipper](https://github.com/haixiong1997/Bilibili-Obsidian-Clipper).
 
-沉浸式布局，支持排版调整、主题切换、字幕同步等。
+The original extension captures existing Bilibili subtitle tracks and saves them to Obsidian. This Plus version adds local Whisper transcription for videos that do not provide subtitle tracks, so you can still generate subtitles, copy them, download them, or save them to Obsidian.
 
-> 稍后再看页面的阅读视图体验尚不完善，推荐在普通视频页使用。
+## Features
 
-### AI 侧边栏（v1.1.0+）
+- Capture native Bilibili subtitle tracks.
+- Generate local Whisper transcriptions when subtitle tracks are unavailable.
+- Cache generated subtitle text in `chrome.storage.local` to avoid repeated transcription.
+- Do not save full video files; temporary audio is cleaned by default.
+- Optional audio cache for debugging or manual reuse.
+- Save notes to Obsidian through Local REST API, with write-after-read verification.
+- Manage subtitle cache from the extension options page.
+- Keep the original AI side panel and reading view capabilities.
 
-支持围绕当前视频字幕进行轻量对话，也可在普通网页中作为通用 AI 对话侧边栏使用。
+## Workflow
 
-内置历史对话、预设提示词、模型切换等能力，适合快速总结、整理与提炼视频内容。
+```text
+Video with subtitle track
+Bilibili page -> Extension reads subtitle track -> Preview / Copy / Download / Save to Obsidian
 
-## 功能图片演示
+Video without subtitle track
+Bilibili page -> Generate transcription -> Local Whisper service processes temporary audio -> Return subtitle -> Cache text -> Preview / Copy / Download / Save to Obsidian
+```
 
-![Bilibili Obsidian Clipper 功能演示](docs/images/feature-demo-v2.png)
+Default behavior:
 
-![Bilibili Obsidian Clipper AI 侧边栏演示](docs/images/33.png)
+```text
+First transcription -> temporary audio -> Whisper -> subtitle text cached in chrome.storage.local -> temporary audio removed -> next open restores cached subtitle
+```
 
-## 安装方式
+## Installation
 
-### 升级说明
+1. Download or clone this repository.
+2. Open Chrome extensions page:
 
-- Chrome / Edge：如果是从 GitHub 手动下载安装包升级，建议直接替换原扩展目录中的文件，并在扩展管理页点击“重新加载”；不要先移除旧扩展，否则本地设置、AI 历史对话和已保存的 Key 可能会丢失。
-- Firefox：当前为“临时加载附加组件”方式，更适合开发调试使用；重新移除并加载新版本后，本地设置和 AI 历史对话可能不会保留。
+```text
+chrome://extensions/
+```
 
-### Chrome / Edge
+3. Enable Developer mode.
+4. Click `Load unpacked`.
+5. Select the `extension` folder in this repository.
+6. If the Chrome Web Store version of the original extension is installed, disable it to avoid duplicate content scripts.
 
-1. 在 GitHub 的 `Releases` 页面下载最新的 `*-chrome.zip` 包
-2. 解压到任意本地目录
-3. 打开扩展管理页：
-   - Chrome：`chrome://extensions/`
-   - Edge：`edge://extensions/`
-4. 开启"开发者模式"
-5. 点击"加载已解压的扩展程序"
-6. 选择解压后的扩展目录
+After updating the extension, click the reload button on the extension card and refresh opened Bilibili video tabs.
 
-### Firefox
+## Obsidian Setup
 
-1. 在 GitHub 的 `Releases` 页面下载最新的 `*-firefox.zip` 包
-2. 解压到任意本地目录
-3. 打开 Firefox 附加组件管理页：`about:addons`
-4. 点击右上角齿轮图标 → "调试附加组件"
-5. 点击"临时加载附加组件..."
-6. 选择解压后的文件夹中的 `manifest.json` 文件
+This extension writes notes through Obsidian Local REST API.
 
-## 项目结构
+1. Install and enable `Local REST API with MCP` in Obsidian.
+2. Enable the HTTP server in that plugin.
+3. Copy the API Key.
+4. Open this extension's options page and configure:
 
-- `README.md` / `LICENSE`：项目说明与许可证
-- `extension/`：插件源码（manifest、js、css、icons）
+```text
+Local REST API URL: http://127.0.0.1:27123
+Local REST API Key: copied from Obsidian
+Note folder: for example, Clippings/Bilibili
+```
 
-## Obsidian 配置
+## Local Whisper Transcription
 
-1. 在 Obsidian 社区插件市场安装并启用 `Local REST API with MCP`
-2. 在插件设置中勾选 `Enable Non-encrypted (HTTP) Server`
-3. 复制插件页面里的 API Key
-4. 在扩展设置页填写 `Local REST API 地址`、`API Key`、`笔记目录`
+Only videos without subtitle tracks need the local Whisper service. Videos with native subtitle tracks do not need it.
 
-## 使用方式
+### Install Dependencies
 
-1. 打开任意 B 站视频页并点击扩展图标
-2. 面板会自动抓取并展示字幕
-3. 按需点击 `刷新 / 复制 / 下载 / 保存到 Obsidian`
+Python 3.10+ is recommended.
 
-## 视频教程
+```powershell
+pip install openai-whisper
+```
 
-- [B 站教程](https://www.bilibili.com/video/BV15qQwB4EZ9/?spm_id_from=333.1387.homepage.video_card.click&vd_source=040bc5ea7866b419558ec2682a2ccb59)
+FFmpeg is also recommended:
 
-## 支持开发者
+```powershell
+ffmpeg -version
+```
 
-如果这个项目对您有帮助，欢迎微信打赏支持我的开发工作。您的支持是我持续改进和维护这个项目的动力。
+For GPU acceleration, install a PyTorch build that matches your CUDA environment. CPU works too, but long videos will be much slower.
 
-<img src="docs/images/weixin.jpg" alt="微信扫码支持开发者" width="264" />
+### Start the Service
 
-## 免责声明
+Run this from the repository root:
 
-> ▎ **用户自负责任条款**：本工具仅在用户已登录 B 站、且有访问权限的前提下获取数据。所有数据通过用户自己的浏览器和 cookie 获取，不经过任何第三方服务器。本工具不存储、不分发任何 B 站内容。使用本工具产生的所有后果由用户自行承担。请遵守 B 站用户协议与相关法律法规。
+```powershell
+python scripts\local_whisper_server.py --model tiny --language zh
+```
+
+Default service URL:
+
+```text
+http://127.0.0.1:8765/v1
+```
+
+Health check:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/health
+```
+
+### Model Selection
+
+```powershell
+python scripts\local_whisper_server.py --model tiny --language zh
+python scripts\local_whisper_server.py --model small --language zh
+```
+
+`tiny` is faster and lighter. `small` is usually more accurate but slower. In the extension options, the model name can stay as `whisper-1`; the actual local model is controlled by the `--model` argument when starting the service.
+
+### Stop the Service
+
+If it is running in the current PowerShell window, press:
+
+```text
+Ctrl + C
+```
+
+If it is running in the background:
+
+```powershell
+$pid = (Get-NetTCPConnection -LocalPort 8765 -State Listen).OwningProcess
+Stop-Process -Id $pid -Force
+```
+
+## Recommended Extension Settings
+
+```text
+Enable no-subtitle transcription: On
+Whisper-compatible Base URL: http://127.0.0.1:8765/v1
+Whisper model name: whisper-1
+Default language: zh
+Max video duration: 3600
+Keep transcription audio cache: Off
+FFmpeg preprocessing: Off
+```
+
+Enable audio cache only when you need to debug or manually reuse the audio. It stores audio only, not full video.
+
+## Cache Model
+
+| Type | Location | Default | Purpose |
+| --- | --- | --- | --- |
+| Subtitle text cache | `chrome.storage.local` | On | Avoid repeated transcription |
+| Audio cache | User-specified directory | Off | Debugging or manual reuse |
+| Full video | Not saved | Not supported | This project does not save video frames |
+
+The options page includes subtitle cache statistics and cleanup buttons. Clearing subtitle cache does not delete Obsidian notes, API keys, or local audio files.
+
+## Usage
+
+1. Open a Bilibili video page.
+2. Click the extension icon.
+3. If the video has subtitle tracks, subtitles are captured directly.
+4. If not, click `Generate transcription`.
+5. Wait for the local Whisper service to finish.
+6. Copy, download, read, or save the result to Obsidian.
+7. The next time you open the same video, cached transcription subtitles are restored first.
+
+## FAQ
+
+### Does `Service Worker inactive` matter?
+
+Usually no. Manifest V3 service workers are suspended by Chrome when idle and wake up when extension events happen.
+
+### Do I need an OpenAI API Key?
+
+No for local `openai-whisper`. You only need an API Key if you use a remote Whisper-compatible service.
+
+### Does the extension download full videos?
+
+No. It temporarily processes audio only. Temporary audio is cleaned by default. Optional audio cache stores audio streams only.
+
+### Why does a transcribed video not need transcription again?
+
+The generated subtitle text is saved in `chrome.storage.local` under the current video and transcription settings. The extension restores it before calling Whisper again.
+
+## Development Checks
+
+```powershell
+node --check extension\background.js
+node --check extension\content.js
+node --check extension\popup.js
+node --check extension\options.js
+node scripts\tests\transcription_normalize.test.mjs
+python -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/local_whisper_server.py').read_text(encoding='utf-8')); print('server ast ok')"
+```
+
+## Project Structure
+
+```text
+extension/                       Chrome extension source
+extension/transcription/          Whisper result normalization
+scripts/local_whisper_server.py   Local Whisper-compatible service
+scripts/tests/                    Lightweight tests
+docs/                             Design and usage notes
+```
+
+## Credits
+
+This project is based on [haixiong1997/Bilibili-Obsidian-Clipper](https://github.com/haixiong1997/Bilibili-Obsidian-Clipper). Thanks to the original author for the open-source foundation.
+
+The Plus version focuses on local Whisper transcription, subtitle text caching, cache management, Obsidian write verification, and local-service adaptation.
+
+## Disclaimer
+
+This tool is intended for personal subtitle organization on Bilibili pages that the user is authorized to access. Please follow Bilibili's terms, copyright rules, and applicable laws.
+
+This project does not provide features for bypassing access control, bulk redistribution, or video content distribution. Users are responsible for their own usage.

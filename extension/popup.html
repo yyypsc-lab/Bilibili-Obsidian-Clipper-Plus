@@ -24,6 +24,7 @@
       </header>
 
       <p id="status" class="status">准备就绪</p>
+      <div id="transcriptionProgress" class="progress" hidden><div id="transcriptionProgressBar" class="progress-bar"></div></div>
 
       <div class="section-title">属性</div>
       <section class="props">
@@ -35,6 +36,9 @@
 
       <label class="label" for="subtitleSelect">语言</label>
       <select id="subtitleSelect"></select>
+
+      <button id="generateTranscriptBtn" type="button" class="transcribe" hidden>生成转写字幕</button>
+      <button id="deleteAudioBtn" type="button" class="transcribe danger" hidden>删除本地音频</button>
 
       <label class="label" for="preview">预览</label>
       <textarea id="preview" readonly wrap="off"></textarea>

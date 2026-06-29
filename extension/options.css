@@ -732,3 +732,32 @@ ol {
     grid-column: 1 / -1;
   }
 }
+
+.cache-manager .cache-stats,
+.cache-manager .cache-status {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.cache-manager .cache-status[data-error="true"] {
+  color: #b91c1c;
+}
+
+.cache-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.cache-actions button {
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.danger-btn {
+  background: #fff1f2;
+  color: #be123c;
+  border-color: #fecdd3;
+}
